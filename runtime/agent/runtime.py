@@ -27,6 +27,8 @@ class AgentRuntime:
         task: Task,
         repository_context: RepositoryContext,
     ) -> AgentState:
+        """Analyze a task, create a plan, and generate actions."""
+
         state = AgentState(
             task=task,
             repository_context=repository_context,
@@ -49,3 +51,48 @@ class AgentRuntime:
         state.status = "READY"
 
         return state
+
+    async def execute(self, state: AgentState) -> AgentState:
+        """Execute the prepared actions sequentially."""
+
+        if state.status != "READY":
+            raise ValueError(
+                f"Agent state must be READY before execution; "
+                f"current status is {state.status}."
+            )
+
+        if not state.actions:
+            state.status = "COMPLETED"
+            return state
+
+        state.status = "EXECUTING"
+
+        for index, action in enumerate(state.actions):
+            state.current_action_index = index
+
+            result = await self.executor.execute(action)
+
+            state.execution_results.append(result)
+
+            if not result.success:
+                state.status = "FAILED"
+                return state
+
+        state.current_action_index = len(state.actions)
+        state.status = "COMPLETED"
+
+        return state
+
+    async def run(
+        self,
+        task: Task,
+        repository_context: RepositoryContext,
+    ) -> AgentState:
+        """Prepare and execute a software engineering task."""
+
+        state = await self.prepare(
+            task=task,
+            repository_context=repository_context,
+        )
+
+        return await self.execute(state)

@@ -1,5 +1,8 @@
 import pytest
 
+from runtime.schemas.execution import ExecutionResult
+from runtime.schemas.action import Action
+from runtime.state.state import AgentState
 from runtime.agent.mock_executor import MockActionExecutor
 from runtime.agent.runtime import AgentRuntime
 from runtime.llm.mock import MockLLMClient
@@ -10,6 +13,23 @@ from runtime.schemas.repository import RepositoryContext
 from runtime.schemas.task import Task
 from runtime.schemas.understanding import TaskUnderstanding
 from runtime.task.understanding import TaskUnderstandingService
+
+
+from runtime.agent.executor import ActionExecutor
+
+
+class RecordingExecutor(ActionExecutor):
+    def __init__(self, results: list[ExecutionResult]) -> None:
+        self.results = results
+        self.executed_actions: list[Action] = []
+
+    async def execute(
+        self,
+        action: Action,
+    ) -> ExecutionResult:
+        self.executed_actions.append(action)
+
+        return self.results[len(self.executed_actions) - 1]
 
 
 @pytest.mark.asyncio
@@ -65,3 +85,228 @@ async def test_agent_runtime_prepare():
     assert state.current_action_index == 0
 
     assert executor.executed_actions == []
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_execute_successfully():
+    llm = MockLLMClient()
+
+    understanding_service = TaskUnderstandingService(llm)
+    planner = Planner(llm)
+    action_generator = ActionGenerator()
+
+    executor = RecordingExecutor(
+        results=[
+            ExecutionResult(
+                action_id="step-1",
+                success=True,
+                stdout="Search completed",
+                exit_code=0,
+                duration_ms=10,
+            ),
+            ExecutionResult(
+                action_id="step-2",
+                success=True,
+                stdout="File read",
+                exit_code=0,
+                duration_ms=5,
+            ),
+        ]
+    )
+
+    runtime = AgentRuntime(
+        understanding_service=understanding_service,
+        planner=planner,
+        action_generator=action_generator,
+        executor=executor,
+    )
+
+    task = Task(
+        id="task-001",
+        description="Fix the login timeout bug.",
+        workspace_path="C:/projects/example",
+    )
+
+    repository_context = RepositoryContext(
+        root="C:/projects/example",
+        summary="Python authentication project",
+    )
+
+    state = await runtime.prepare(
+        task=task,
+        repository_context=repository_context,
+    )
+
+    assert state.status == "READY"
+
+    state = await runtime.execute(state)
+
+    assert state.status == "COMPLETED"
+
+    assert len(state.execution_results) == 2
+
+    assert state.execution_results[0].action_id == "step-1"
+    assert state.execution_results[1].action_id == "step-2"
+
+    assert len(executor.executed_actions) == 2
+    assert executor.executed_actions[0].id == "step-1"
+    assert executor.executed_actions[1].id == "step-2"
+
+    assert state.current_action_index == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_stops_when_action_fails():
+    llm = MockLLMClient()
+
+    understanding_service = TaskUnderstandingService(llm)
+    planner = Planner(llm)
+    action_generator = ActionGenerator()
+
+    executor = RecordingExecutor(
+        results=[
+            ExecutionResult(
+                action_id="step-1",
+                success=False,
+                stdout="",
+                stderr="Search failed",
+                exit_code=1,
+                duration_ms=10,
+            ),
+            ExecutionResult(
+                action_id="step-2",
+                success=True,
+                stdout="This should not run",
+                exit_code=0,
+                duration_ms=5,
+            ),
+        ]
+    )
+
+    runtime = AgentRuntime(
+        understanding_service=understanding_service,
+        planner=planner,
+        action_generator=action_generator,
+        executor=executor,
+    )
+
+    task = Task(
+        id="task-001",
+        description="Fix the login timeout bug.",
+        workspace_path="C:/projects/example",
+    )
+
+    repository_context = RepositoryContext(
+        root="C:/projects/example",
+        summary="Python authentication project",
+    )
+
+    state = await runtime.prepare(
+        task=task,
+        repository_context=repository_context,
+    )
+
+    state = await runtime.execute(state)
+
+    assert state.status == "FAILED"
+
+    assert len(state.execution_results) == 1
+
+    assert state.execution_results[0].success is False
+
+    assert len(executor.executed_actions) == 1
+    assert executor.executed_actions[0].id == "step-1"
+
+    assert state.current_action_index == 0
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_rejects_execution_before_ready():
+    llm = MockLLMClient()
+
+    understanding_service = TaskUnderstandingService(llm)
+    planner = Planner(llm)
+    action_generator = ActionGenerator()
+
+    executor = RecordingExecutor(results=[])
+
+    runtime = AgentRuntime(
+        understanding_service=understanding_service,
+        planner=planner,
+        action_generator=action_generator,
+        executor=executor,
+    )
+
+    task = Task(
+        id="task-001",
+        description="Fix the bug.",
+        workspace_path="C:/projects/example",
+    )
+
+    state = AgentState(task=task)
+
+    with pytest.raises(
+        ValueError,
+        match="Agent state must be READY before execution",
+    ):
+        await runtime.execute(state)
+
+    assert executor.executed_actions == []
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_run_executes_complete_pipeline():
+    llm = MockLLMClient()
+
+    understanding_service = TaskUnderstandingService(llm)
+    planner = Planner(llm)
+    action_generator = ActionGenerator()
+
+    executor = RecordingExecutor(
+        results=[
+            ExecutionResult(
+                action_id="step-1",
+                success=True,
+                stdout="Search completed",
+                exit_code=0,
+            ),
+            ExecutionResult(
+                action_id="step-2",
+                success=True,
+                stdout="Read completed",
+                exit_code=0,
+            ),
+        ]
+    )
+
+    runtime = AgentRuntime(
+        understanding_service=understanding_service,
+        planner=planner,
+        action_generator=action_generator,
+        executor=executor,
+    )
+
+    task = Task(
+        id="task-001",
+        description="Fix the login timeout bug.",
+        workspace_path="C:/projects/example",
+    )
+
+    repository_context = RepositoryContext(
+        root="C:/projects/example",
+        summary="Python authentication project",
+    )
+
+    state = await runtime.run(
+        task=task,
+        repository_context=repository_context,
+    )
+
+    assert state.status == "COMPLETED"
+
+    assert state.understanding is not None
+    assert state.plan is not None
+
+    assert len(state.actions) == 2
+    assert len(state.execution_results) == 2
+    assert len(executor.executed_actions) == 2
