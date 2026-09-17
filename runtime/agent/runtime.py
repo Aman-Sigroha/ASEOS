@@ -7,6 +7,7 @@ from runtime.schemas.repository import RepositoryContext
 from runtime.schemas.task import Task
 from runtime.state.state import AgentState
 from runtime.task.understanding import TaskUnderstandingService
+from uuid import uuid4
 
 
 class AgentRuntime:
@@ -37,7 +38,7 @@ class AgentRuntime:
         """Emit an agent event."""
 
         event = AgentEvent(
-            event_id=f"{task_id}-{event_type.lower()}",
+            event_id=str(uuid4()),
             task_id=task_id,
             event_type=event_type,
             action_id=action_id,

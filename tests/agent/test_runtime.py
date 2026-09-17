@@ -513,3 +513,37 @@ async def test_agent_runtime_emits_failure_events():
     assert events[2].action_id == "step-1"
 
     assert events[1].data["exit_code"] == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_emits_unique_event_ids():
+    emitter = EventEmitter()
+    events = []
+    emitter.subscribe(events.append)
+
+    runtime = AgentRuntime(
+        understanding_service=TaskUnderstandingService(MockLLMClient()),
+        planner=Planner(MockLLMClient()),
+        action_generator=ActionGenerator(),
+        executor=MockActionExecutor(),
+        event_emitter=emitter,
+    )
+
+    task = Task(
+        id="task-001",
+        description="Fix calculator bug",
+        workspace_path="/workspace",
+    )
+
+    repository_context = RepositoryContext(
+        root="/workspace",
+        summary="Python calculator project",
+    )
+
+    state = await runtime.run(task, repository_context)
+
+    assert state.status == "COMPLETED"
+
+    event_ids = [event.event_id for event in events]
+
+    assert len(event_ids) == len(set(event_ids))
