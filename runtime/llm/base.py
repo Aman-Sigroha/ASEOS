@@ -3,23 +3,31 @@ from typing import Any
 
 
 class LLMClient(ABC):
-    """Provider-agnostic interface for interacting with an LLM."""
-
     @abstractmethod
     async def generate(
         self,
         messages: list[dict[str, str]],
         **kwargs: Any,
     ) -> str:
-        """Generate a plain-text response."""
+        """Generate a text response."""
         raise NotImplementedError
 
     @abstractmethod
     async def generate_structured(
         self,
         messages: list[dict[str, str]],
-        schema: type[Any],
+        response_model: type,
         **kwargs: Any,
-    ) -> Any:
-        """Generate a response conforming to the supplied schema."""
+    ):
+        """Generate a response validated against a schema."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def generate_with_tools(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ):
+        """Generate a response with tool-calling support."""
         raise NotImplementedError
