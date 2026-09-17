@@ -19,6 +19,9 @@ from runtime.agent.executor import ActionExecutor
 from runtime.events.event import AgentEvent
 from runtime.events.emitter import EventEmitter
 from runtime.events.store import SQLiteEventStore
+from runtime.decision.decision import Decision
+from runtime.decision.engine import DecisionEngine
+from runtime.schemas.plan import Plan, PlanStep
 
 
 class RecordingExecutor(ActionExecutor):
@@ -583,3 +586,202 @@ async def test_agent_runtime_persists_events(tmp_path):
     assert events[0].event_type == "TASK_STARTED"
     assert events[-1].event_type == "TASK_COMPLETED"
     assert all(event.task_id == task.id for event in events)
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_uses_decision_engine():
+    class RecordingDecisionEngine(DecisionEngine):
+        def __init__(self):
+            self.calls = 0
+
+        async def decide(self, state):
+            self.calls += 1
+
+            if self.calls == 1:
+                return Decision(
+                    decision_type="EXECUTE_ACTION",
+                    action_id="step-1",
+                    reason="Execute first action.",
+                    confidence=1.0,
+                )
+
+            return Decision(
+                decision_type="COMPLETE",
+                reason="Execution is complete.",
+                confidence=1.0,
+            )
+
+    decision_engine = RecordingDecisionEngine()
+
+    runtime = AgentRuntime(
+        understanding_service=TaskUnderstandingService(MockLLMClient()),
+        planner=Planner(MockLLMClient()),
+        action_generator=ActionGenerator(),
+        executor=MockActionExecutor(),
+        decision_engine=decision_engine,
+    )
+
+    task = Task(
+        id="task-001",
+        description="Fix calculator bug",
+        workspace_path="/workspace",
+    )
+
+    repository_context = RepositoryContext(
+        root="/workspace",
+        summary="Python calculator project",
+    )
+
+    state = await runtime.run(task, repository_context)
+
+    assert state.status == "COMPLETED"
+    assert decision_engine.calls == 2
+    assert len(state.execution_results) == 1
+    assert state.execution_results[0].action_id == "step-1"
+
+
+class RecordingReplanner:
+    def __init__(self):
+        self.calls = 0
+        self.execution_results = []
+
+    async def replan(
+        self,
+        task,
+        understanding,
+        repository_context,
+        current_plan,
+        execution_results,
+    ):
+        self.calls += 1
+        self.execution_results = execution_results.copy()
+
+        return Plan(
+            task_id=task.id,
+            goal="Recovered plan",
+            steps=[
+                PlanStep(
+                    id="replan-step-1",
+                    description="Apply corrected implementation",
+                    action_type="EDIT",
+                    parameters={
+                        "path": "src/calculator.py",
+                    },
+                ),
+            ],
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_replans_after_failed_action():
+    class RecoveryExecutor(ActionExecutor):
+        def __init__(self):
+            self.calls = 0
+            self.executed_actions = []
+
+        async def execute(self, action):
+            self.calls += 1
+            self.executed_actions.append(action)
+
+            if self.calls == 1:
+                return ExecutionResult(
+                    action_id=action.id,
+                    success=False,
+                    stderr="Initial approach failed",
+                    exit_code=1,
+                    duration_ms=10,
+                )
+
+            return ExecutionResult(
+                action_id=action.id,
+                success=True,
+                exit_code=0,
+                duration_ms=10,
+            )
+
+    replanner = RecordingReplanner()
+    executor = RecoveryExecutor()
+
+    runtime = AgentRuntime(
+        understanding_service=TaskUnderstandingService(MockLLMClient()),
+        planner=Planner(MockLLMClient()),
+        action_generator=ActionGenerator(),
+        executor=executor,
+        replanner=replanner,
+    )
+
+    task = Task(
+        id="task-001",
+        description="Fix calculator bug",
+        workspace_path="/workspace",
+    )
+
+    repository_context = RepositoryContext(
+        root="/workspace",
+        summary="Python calculator project",
+    )
+
+    state = await runtime.run(
+        task,
+        repository_context,
+    )
+
+    assert state.status == "COMPLETED"
+    assert replanner.calls == 1
+    assert state.replan_count == 1
+
+    assert len(replanner.execution_results) == 1
+    assert replanner.execution_results[0].success is False
+
+    assert len(state.execution_results) == 2
+    assert state.execution_results[0].success is False
+    assert state.execution_results[1].success is True
+
+    assert len(state.current_plan_results) == 1
+    assert state.current_plan_results[0].success is True
+
+    assert executor.calls == 2
+    assert executor.executed_actions[1].id == "replan-step-1"
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_stops_after_max_replans():
+    class AlwaysFailExecutor(ActionExecutor):
+        async def execute(self, action):
+            return ExecutionResult(
+                action_id=action.id,
+                success=False,
+                stderr="Always fails",
+                exit_code=1,
+            )
+
+    replanner = RecordingReplanner()
+
+    runtime = AgentRuntime(
+        understanding_service=TaskUnderstandingService(MockLLMClient()),
+        planner=Planner(MockLLMClient()),
+        action_generator=ActionGenerator(),
+        executor=AlwaysFailExecutor(),
+        replanner=replanner,
+        max_replans=2,
+    )
+
+    task = Task(
+        id="task-001",
+        description="Fix calculator bug",
+        workspace_path="/workspace",
+    )
+
+    repository_context = RepositoryContext(
+        root="/workspace",
+        summary="Python calculator project",
+    )
+
+    state = await runtime.run(
+        task,
+        repository_context,
+    )
+
+    assert state.status == "FAILED"
+    assert state.replan_count == 2
+    assert replanner.calls == 2

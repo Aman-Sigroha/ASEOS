@@ -23,16 +23,13 @@ AgentStatus = Literal[
 
 
 class AgentState(BaseModel):
-    """Current state of an ASEOS engineering task."""
-
     task: Task
     status: AgentStatus = "CREATED"
-
     understanding: TaskUnderstanding | None = None
     repository_context: RepositoryContext | None = None
     plan: Plan | None = None
-
     actions: list[Action] = Field(default_factory=list)
     execution_results: list[ExecutionResult] = Field(default_factory=list)
-
+    current_plan_results: list[ExecutionResult] = Field(default_factory=list)
     current_action_index: int = Field(default=0, ge=0)
+    replan_count: int = Field(default=0, ge=0)

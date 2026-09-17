@@ -26,8 +26,8 @@ class DeterministicDecisionEngine(DecisionEngine):
                 confidence=1.0,
             )
 
-        if state.execution_results:
-            last_result = state.execution_results[-1]
+        if state.current_plan_results:
+            last_result = state.current_plan_results[-1]
 
             if not last_result.success:
                 return Decision(
@@ -36,7 +36,7 @@ class DeterministicDecisionEngine(DecisionEngine):
                     confidence=1.0,
                 )
 
-        next_action_index = len(state.execution_results)
+        next_action_index = len(state.current_plan_results)
 
         if next_action_index >= len(state.actions):
             return Decision(

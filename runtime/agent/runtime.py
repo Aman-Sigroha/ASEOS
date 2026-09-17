@@ -11,6 +11,7 @@ from uuid import uuid4
 from runtime.decision.decision import Decision
 from runtime.decision.deterministic import DeterministicDecisionEngine
 from runtime.decision.engine import DecisionEngine
+from runtime.planner.replanner import Replanner
 
 
 class AgentRuntime:
@@ -25,11 +26,20 @@ class AgentRuntime:
         event_emitter: EventEmitter | None = None,
         event_store: EventStore | None = None,
         decision_engine: DecisionEngine | None = None,
+        replanner: Replanner | None = None,
+        max_replans: int = 3,
     ) -> None:
         self.understanding_service = understanding_service
         self.planner = planner
         self.action_generator = action_generator
         self.executor = executor
+        if max_replans < 0:
+            raise ValueError("max_replans cannot be negative.")
+
+        self.decision_engine = decision_engine or DeterministicDecisionEngine()
+
+        self.replanner = replanner
+        self.max_replans = max_replans
         self.decision_engine = decision_engine or DeterministicDecisionEngine()
         if event_emitter is not None and event_store is not None:
             raise ValueError("Provide either event_emitter or event_store, not both.")
@@ -134,25 +144,93 @@ class AgentRuntime:
                 return state
 
             if decision.decision_type == "REPLAN":
-                state.status = "FAILED"
+                if self.replanner is None:
+                    state.status = "FAILED"
 
-                failed_action_id = (
-                    state.execution_results[-1].action_id
-                    if state.execution_results
-                    else None
+                    failed_action_id = (
+                        state.execution_results[-1].action_id
+                        if state.execution_results
+                        else None
+                    )
+
+                    self._emit(
+                        task_id=state.task.id,
+                        event_type="TASK_FAILED",
+                        action_id=failed_action_id,
+                        message=(
+                            "Decision engine requested replanning, "
+                            "but replanning is not configured."
+                        ),
+                    )
+
+                    return state
+
+                if state.replan_count >= self.max_replans:
+                    state.status = "FAILED"
+
+                    failed_action_id = (
+                        state.execution_results[-1].action_id
+                        if state.execution_results
+                        else None
+                    )
+
+                    self._emit(
+                        task_id=state.task.id,
+                        event_type="TASK_FAILED",
+                        action_id=failed_action_id,
+                        message="Maximum replanning attempts reached.",
+                        data={
+                            "replan_count": state.replan_count,
+                            "max_replans": self.max_replans,
+                        },
+                    )
+
+                    return state
+
+                state.replan_count += 1
+
+                new_plan = await self.replanner.replan(
+                    task=state.task,
+                    understanding=state.understanding,
+                    repository_context=state.repository_context,
+                    current_plan=state.plan,
+                    execution_results=state.execution_results,
                 )
+
+                if new_plan.task_id != state.task.id:
+                    state.status = "FAILED"
+
+                    self._emit(
+                        task_id=state.task.id,
+                        event_type="TASK_FAILED",
+                        message="Replanner returned a plan for the wrong task.",
+                        data={
+                            "expected_task_id": state.task.id,
+                            "received_task_id": new_plan.task_id,
+                        },
+                    )
+
+                    return state
+
+                state.plan = new_plan
+                state.actions = self.action_generator.generate(new_plan)
+
+                state.current_action_index = 0
+                state.current_plan_results.clear()
 
                 self._emit(
                     task_id=state.task.id,
-                    event_type="TASK_FAILED",
-                    action_id=failed_action_id,
-                    message=(
-                        "Decision engine requested replanning, "
-                        "but replanning is not yet implemented."
-                    ),
+                    event_type="PLAN_CREATED",
+                    message="Plan replanned successfully",
+                    data={
+                        "step_count": len(new_plan.steps),
+                        "action_count": len(state.actions),
+                        "replan_count": state.replan_count,
+                        "replanned": True,
+                    },
                 )
 
-                return state
+                continue
 
             if decision.decision_type == "ABORT":
                 state.status = "FAILED"
@@ -220,6 +298,7 @@ class AgentRuntime:
 
             result = await self.executor.execute(action)
             state.execution_results.append(result)
+            state.current_plan_results.append(result)
 
             if not result.success:
                 self._emit(

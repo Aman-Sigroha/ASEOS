@@ -10,6 +10,7 @@ from runtime.state.state import AgentState
 def make_state(
     actions: list[Action] | None = None,
     execution_results: list[ExecutionResult] | None = None,
+    current_plan_results: list[ExecutionResult] | None = None,
     status: str = "READY",
 ) -> AgentState:
     return AgentState(
@@ -21,6 +22,7 @@ def make_state(
         status=status,
         actions=actions or [],
         execution_results=execution_results or [],
+        current_plan_results=current_plan_results or [],
     )
 
 
@@ -71,6 +73,7 @@ async def test_decision_engine_executes_next_action():
     state = make_state(
         actions=actions,
         execution_results=execution_results,
+        current_plan_results=execution_results,
     )
 
     decision = await DeterministicDecisionEngine().decide(state)
@@ -101,6 +104,7 @@ async def test_decision_engine_completes_when_all_actions_succeed():
     state = make_state(
         actions=actions,
         execution_results=execution_results,
+        current_plan_results=execution_results,
     )
 
     decision = await DeterministicDecisionEngine().decide(state)
@@ -132,6 +136,7 @@ async def test_decision_engine_requests_replan_after_failed_action():
     state = make_state(
         actions=actions,
         execution_results=execution_results,
+        current_plan_results=execution_results,
     )
 
     decision = await DeterministicDecisionEngine().decide(state)
