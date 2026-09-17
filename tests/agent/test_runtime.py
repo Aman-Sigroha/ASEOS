@@ -16,6 +16,8 @@ from runtime.task.understanding import TaskUnderstandingService
 
 
 from runtime.agent.executor import ActionExecutor
+from runtime.events.event import AgentEvent
+from runtime.events.emitter import EventEmitter
 
 
 class RecordingExecutor(ActionExecutor):
@@ -310,3 +312,204 @@ async def test_agent_runtime_run_executes_complete_pipeline():
     assert len(state.actions) == 2
     assert len(state.execution_results) == 2
     assert len(executor.executed_actions) == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_emits_prepare_events():
+    llm = MockLLMClient()
+
+    understanding_service = TaskUnderstandingService(llm)
+    planner = Planner(llm)
+    action_generator = ActionGenerator()
+    executor = RecordingExecutor(results=[])
+
+    emitter = EventEmitter()
+    events: list[AgentEvent] = []
+
+    emitter.subscribe(events.append)
+
+    runtime = AgentRuntime(
+        understanding_service=understanding_service,
+        planner=planner,
+        action_generator=action_generator,
+        executor=executor,
+        event_emitter=emitter,
+    )
+
+    task = Task(
+        id="task-001",
+        description="Fix the login timeout bug.",
+        workspace_path="C:/projects/example",
+    )
+
+    repository_context = RepositoryContext(
+        root="C:/projects/example",
+        summary="Python authentication project",
+    )
+
+    state = await runtime.prepare(
+        task=task,
+        repository_context=repository_context,
+    )
+
+    assert state.status == "READY"
+
+    assert [event.event_type for event in events] == [
+        "TASK_STARTED",
+        "TASK_UNDERSTANDING_COMPLETED",
+        "PLAN_CREATED",
+    ]
+
+    assert all(event.task_id == "task-001" for event in events)
+
+    assert events[0].message == "Task started"
+    assert events[1].message == "Task understanding completed"
+    assert events[2].message == "Plan created"
+
+    assert events[2].data["action_count"] == len(state.actions)
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_emits_successful_execution_events():
+    llm = MockLLMClient()
+
+    understanding_service = TaskUnderstandingService(llm)
+    planner = Planner(llm)
+    action_generator = ActionGenerator()
+
+    executor = RecordingExecutor(
+        results=[
+            ExecutionResult(
+                action_id="step-1",
+                success=True,
+                stdout="Search completed",
+                exit_code=0,
+                duration_ms=10,
+            ),
+            ExecutionResult(
+                action_id="step-2",
+                success=True,
+                stdout="Read completed",
+                exit_code=0,
+                duration_ms=5,
+            ),
+        ]
+    )
+
+    emitter = EventEmitter()
+    events: list[AgentEvent] = []
+    emitter.subscribe(events.append)
+
+    runtime = AgentRuntime(
+        understanding_service=understanding_service,
+        planner=planner,
+        action_generator=action_generator,
+        executor=executor,
+        event_emitter=emitter,
+    )
+
+    task = Task(
+        id="task-001",
+        description="Fix the login timeout bug.",
+        workspace_path="C:/projects/example",
+    )
+
+    repository_context = RepositoryContext(
+        root="C:/projects/example",
+        summary="Python authentication project",
+    )
+
+    state = await runtime.prepare(
+        task=task,
+        repository_context=repository_context,
+    )
+
+    events.clear()
+
+    state = await runtime.execute(state)
+
+    assert state.status == "COMPLETED"
+
+    assert [event.event_type for event in events] == [
+        "ACTION_STARTED",
+        "ACTION_COMPLETED",
+        "ACTION_STARTED",
+        "ACTION_COMPLETED",
+        "TASK_COMPLETED",
+    ]
+
+    assert events[0].action_id == "step-1"
+    assert events[1].action_id == "step-1"
+
+    assert events[2].action_id == "step-2"
+    assert events[3].action_id == "step-2"
+
+    assert events[-1].task_id == "task-001"
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_emits_failure_events():
+    llm = MockLLMClient()
+
+    understanding_service = TaskUnderstandingService(llm)
+    planner = Planner(llm)
+    action_generator = ActionGenerator()
+
+    executor = RecordingExecutor(
+        results=[
+            ExecutionResult(
+                action_id="step-1",
+                success=False,
+                stdout="",
+                stderr="Search failed",
+                exit_code=1,
+                duration_ms=10,
+            )
+        ]
+    )
+
+    emitter = EventEmitter()
+    events: list[AgentEvent] = []
+    emitter.subscribe(events.append)
+
+    runtime = AgentRuntime(
+        understanding_service=understanding_service,
+        planner=planner,
+        action_generator=action_generator,
+        executor=executor,
+        event_emitter=emitter,
+    )
+
+    task = Task(
+        id="task-001",
+        description="Fix the login timeout bug.",
+        workspace_path="C:/projects/example",
+    )
+
+    repository_context = RepositoryContext(
+        root="C:/projects/example",
+        summary="Python authentication project",
+    )
+
+    state = await runtime.prepare(
+        task=task,
+        repository_context=repository_context,
+    )
+
+    events.clear()
+
+    state = await runtime.execute(state)
+
+    assert state.status == "FAILED"
+
+    assert [event.event_type for event in events] == [
+        "ACTION_STARTED",
+        "ACTION_FAILED",
+        "TASK_FAILED",
+    ]
+
+    assert events[0].action_id == "step-1"
+    assert events[1].action_id == "step-1"
+    assert events[2].action_id == "step-1"
+
+    assert events[1].data["exit_code"] == 1
