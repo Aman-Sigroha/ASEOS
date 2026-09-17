@@ -12,6 +12,7 @@ from runtime.decision.decision import Decision
 from runtime.decision.deterministic import DeterministicDecisionEngine
 from runtime.decision.engine import DecisionEngine
 from runtime.planner.replanner import Replanner
+from runtime.verification.verifier import Verifier
 
 
 class AgentRuntime:
@@ -28,6 +29,7 @@ class AgentRuntime:
         decision_engine: DecisionEngine | None = None,
         replanner: Replanner | None = None,
         max_replans: int = 3,
+        verifier: Verifier | None = None,
     ) -> None:
         self.understanding_service = understanding_service
         self.planner = planner
@@ -45,6 +47,7 @@ class AgentRuntime:
             raise ValueError("Provide either event_emitter or event_store, not both.")
 
         self.event_emitter = event_emitter or EventEmitter(event_store=event_store)
+        self.verifier = verifier
 
     def _emit(
         self,
@@ -132,13 +135,69 @@ class AgentRuntime:
             decision = await self.decision_engine.decide(state)
 
             if decision.decision_type == "COMPLETE":
-                state.current_action_index = len(state.actions)
-                state.status = "COMPLETED"
+                if self.verifier is None:
+                    state.current_action_index = len(state.actions)
+                    state.status = "COMPLETED"
+
+                    self._emit(
+                        task_id=state.task.id,
+                        event_type="TASK_COMPLETED",
+                        message="Task completed successfully",
+                    )
+
+                    return state
+
+                state.status = "VERIFYING"
 
                 self._emit(
                     task_id=state.task.id,
-                    event_type="TASK_COMPLETED",
-                    message="Task completed successfully",
+                    event_type="VERIFICATION_STARTED",
+                    message="Task verification started",
+                )
+
+                verification_result = await self.verifier.verify(state)
+                state.verification_result = verification_result
+
+                if verification_result.status == "PASS":
+                    state.current_action_index = len(state.actions)
+                    state.status = "COMPLETED"
+
+                    self._emit(
+                        task_id=state.task.id,
+                        event_type="VERIFICATION_COMPLETED",
+                        message="Task verification passed",
+                        data={
+                            "status": verification_result.status,
+                            "check_count": len(verification_result.checks),
+                            "summary": verification_result.summary,
+                        },
+                    )
+
+                    self._emit(
+                        task_id=state.task.id,
+                        event_type="TASK_COMPLETED",
+                        message="Task completed successfully",
+                    )
+
+                    return state
+
+                state.status = "FAILED"
+
+                self._emit(
+                    task_id=state.task.id,
+                    event_type="VERIFICATION_FAILED",
+                    message="Task verification failed",
+                    data={
+                        "status": verification_result.status,
+                        "check_count": len(verification_result.checks),
+                        "summary": verification_result.summary,
+                    },
+                )
+
+                self._emit(
+                    task_id=state.task.id,
+                    event_type="TASK_FAILED",
+                    message="Task failed verification",
                 )
 
                 return state

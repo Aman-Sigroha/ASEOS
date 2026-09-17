@@ -22,6 +22,11 @@ from runtime.events.store import SQLiteEventStore
 from runtime.decision.decision import Decision
 from runtime.decision.engine import DecisionEngine
 from runtime.schemas.plan import Plan, PlanStep
+from runtime.verification.result import (
+    VerificationCheck,
+    VerificationResult,
+)
+from runtime.verification.verifier import Verifier
 
 
 class RecordingExecutor(ActionExecutor):
@@ -864,3 +869,155 @@ async def test_agent_runtime_stops_after_max_replans():
     assert state.status == "FAILED"
     assert state.replan_count == 2
     assert replanner.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_verifies_before_completion():
+    class PassingVerifier(Verifier):
+        def __init__(self):
+            self.calls = 0
+
+        async def verify(self, state):
+            self.calls += 1
+
+            return VerificationResult(
+                status="PASS",
+                checks=[
+                    VerificationCheck(
+                        name="unit-tests",
+                        status="PASS",
+                        message="All tests passed.",
+                    )
+                ],
+                summary="Verification passed.",
+            )
+
+    verifier = PassingVerifier()
+
+    runtime = AgentRuntime(
+        understanding_service=TaskUnderstandingService(MockLLMClient()),
+        planner=Planner(MockLLMClient()),
+        action_generator=ActionGenerator(),
+        executor=MockActionExecutor(),
+        verifier=verifier,
+    )
+
+    task = Task(
+        id="task-001",
+        description="Fix calculator bug",
+        workspace_path="/workspace",
+    )
+
+    repository_context = RepositoryContext(
+        root="/workspace",
+        summary="Python calculator project",
+    )
+
+    state = await runtime.run(
+        task,
+        repository_context,
+    )
+
+    assert state.status == "COMPLETED"
+    assert verifier.calls == 1
+    assert state.verification_result is not None
+    assert state.verification_result.status == "PASS"
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_fails_when_verification_fails():
+    class FailingVerifier(Verifier):
+        async def verify(self, state):
+            return VerificationResult(
+                status="FAIL",
+                checks=[
+                    VerificationCheck(
+                        name="unit-tests",
+                        status="FAIL",
+                        message="One test failed.",
+                    )
+                ],
+                summary="Verification failed.",
+            )
+
+    runtime = AgentRuntime(
+        understanding_service=TaskUnderstandingService(MockLLMClient()),
+        planner=Planner(MockLLMClient()),
+        action_generator=ActionGenerator(),
+        executor=MockActionExecutor(),
+        verifier=FailingVerifier(),
+    )
+
+    task = Task(
+        id="task-001",
+        description="Fix calculator bug",
+        workspace_path="/workspace",
+    )
+
+    repository_context = RepositoryContext(
+        root="/workspace",
+        summary="Python calculator project",
+    )
+
+    state = await runtime.run(
+        task,
+        repository_context,
+    )
+
+    assert state.status == "FAILED"
+    assert state.verification_result is not None
+    assert state.verification_result.status == "FAIL"
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_emits_verification_events():
+    class PassingVerifier(Verifier):
+        async def verify(self, state):
+            return VerificationResult(
+                status="PASS",
+                checks=[
+                    VerificationCheck(
+                        name="tests",
+                        status="PASS",
+                    )
+                ],
+                summary="Verification passed.",
+            )
+
+    emitter = EventEmitter()
+    events: list[AgentEvent] = []
+    emitter.subscribe(events.append)
+
+    runtime = AgentRuntime(
+        understanding_service=TaskUnderstandingService(MockLLMClient()),
+        planner=Planner(MockLLMClient()),
+        action_generator=ActionGenerator(),
+        executor=MockActionExecutor(),
+        event_emitter=emitter,
+        verifier=PassingVerifier(),
+    )
+
+    task = Task(
+        id="task-001",
+        description="Fix calculator bug",
+        workspace_path="/workspace",
+    )
+
+    repository_context = RepositoryContext(
+        root="/workspace",
+        summary="Python calculator project",
+    )
+
+    state = await runtime.run(
+        task,
+        repository_context,
+    )
+
+    assert state.status == "COMPLETED"
+
+    event_types = [event.event_type for event in events]
+
+    assert "VERIFICATION_STARTED" in event_types
+    assert "VERIFICATION_COMPLETED" in event_types
+
+    assert event_types[-1] == "TASK_COMPLETED"

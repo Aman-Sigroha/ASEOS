@@ -8,6 +8,7 @@ from runtime.schemas.plan import Plan
 from runtime.schemas.repository import RepositoryContext
 from runtime.schemas.task import Task
 from runtime.schemas.understanding import TaskUnderstanding
+from runtime.verification.result import VerificationResult
 
 
 AgentStatus = Literal[
@@ -31,5 +32,6 @@ class AgentState(BaseModel):
     actions: list[Action] = Field(default_factory=list)
     execution_results: list[ExecutionResult] = Field(default_factory=list)
     current_plan_results: list[ExecutionResult] = Field(default_factory=list)
+    verification_result: VerificationResult | None = None
     current_action_index: int = Field(default=0, ge=0)
     replan_count: int = Field(default=0, ge=0)
