@@ -599,7 +599,7 @@ async def test_agent_runtime_uses_decision_engine():
         def __init__(self):
             self.calls = 0
 
-        async def decide(self, state):
+        async def decide(self, context):
             self.calls += 1
 
             if self.calls == 1:

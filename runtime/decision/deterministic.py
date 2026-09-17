@@ -1,18 +1,18 @@
+from runtime.decision.context import DecisionContext
 from runtime.decision.decision import Decision
 from runtime.decision.engine import DecisionEngine
-from runtime.state.state import AgentState
 
 
 class DeterministicDecisionEngine(DecisionEngine):
-    async def decide(self, state: AgentState) -> Decision:
-        if state.status == "COMPLETED":
+    async def decide(self, context: DecisionContext) -> Decision:
+        if context.status == "COMPLETED":
             return Decision(
                 decision_type="COMPLETE",
                 reason="The task has already completed.",
                 confidence=1.0,
             )
 
-        if state.status == "FAILED":
+        if context.status == "FAILED":
             return Decision(
                 decision_type="REPLAN",
                 reason="The previous execution failed and requires replanning.",
@@ -20,8 +20,8 @@ class DeterministicDecisionEngine(DecisionEngine):
             )
 
         if (
-            state.verification_result is not None
-            and state.verification_result.status != "PASS"
+            context.verification_result is not None
+            and context.verification_result.status != "PASS"
         ):
             return Decision(
                 decision_type="REPLAN",
@@ -29,15 +29,15 @@ class DeterministicDecisionEngine(DecisionEngine):
                 confidence=1.0,
             )
 
-        if not state.actions:
+        if not context.actions:
             return Decision(
                 decision_type="COMPLETE",
                 reason="There are no actions remaining.",
                 confidence=1.0,
             )
 
-        if state.current_plan_results:
-            last_result = state.current_plan_results[-1]
+        if context.current_plan_results:
+            last_result = context.current_plan_results[-1]
 
             if not last_result.success:
                 return Decision(
@@ -46,16 +46,16 @@ class DeterministicDecisionEngine(DecisionEngine):
                     confidence=1.0,
                 )
 
-        next_action_index = len(state.current_plan_results)
+        next_action_index = len(context.current_plan_results)
 
-        if next_action_index >= len(state.actions):
+        if next_action_index >= len(context.actions):
             return Decision(
                 decision_type="COMPLETE",
                 reason="All planned actions have been executed successfully.",
                 confidence=1.0,
             )
 
-        next_action = state.actions[next_action_index]
+        next_action = context.actions[next_action_index]
 
         return Decision(
             decision_type="EXECUTE_ACTION",

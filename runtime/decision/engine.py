@@ -1,10 +1,10 @@
 from abc import ABC, abstractmethod
 
+from runtime.decision.context import DecisionContext
 from runtime.decision.decision import Decision
-from runtime.state.state import AgentState
 
 
 class DecisionEngine(ABC):
     @abstractmethod
-    async def decide(self, state: AgentState) -> Decision:
+    async def decide(self, context: DecisionContext) -> Decision:
         raise NotImplementedError

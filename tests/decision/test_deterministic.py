@@ -6,24 +6,31 @@ from runtime.schemas.execution import ExecutionResult
 from runtime.schemas.task import Task
 from runtime.state.state import AgentState
 from runtime.verification.result import VerificationResult
+from runtime.decision.context import DecisionContext
+from runtime.schemas.understanding import TaskUnderstanding
 
 
-def make_state(
+def make_context(
     actions: list[Action] | None = None,
     execution_results: list[ExecutionResult] | None = None,
     current_plan_results: list[ExecutionResult] | None = None,
     status: str = "READY",
-) -> AgentState:
-    return AgentState(
-        task=Task(
-            id="task-001",
-            description="Test task",
-            workspace_path="/workspace",
-        ),
-        status=status,
+) -> DecisionContext:
+    understanding = TaskUnderstanding(
+        goal="Fix calculator bug",
+        expected_outcome="Calculator returns correct results",
+    )
+
+    return DecisionContext(
+        task_id="task-001",
+        task_description="Fix calculator bug",
+        understanding=understanding,
+        repository_summary="Python calculator project",
+        plan_goal="Fix calculator bug",
         actions=actions or [],
         execution_results=execution_results or [],
         current_plan_results=current_plan_results or [],
+        status=status,
     )
 
 
@@ -38,9 +45,9 @@ async def test_decision_engine_executes_first_action():
         ),
     ]
 
-    state = make_state(actions=actions)
+    context = make_context(actions=actions)
 
-    decision = await DeterministicDecisionEngine().decide(state)
+    decision = await DeterministicDecisionEngine().decide(context)
 
     assert decision.decision_type == "EXECUTE_ACTION"
     assert decision.action_id == "action-001"
@@ -71,13 +78,13 @@ async def test_decision_engine_executes_next_action():
         ),
     ]
 
-    state = make_state(
+    context = make_context(
         actions=actions,
         execution_results=execution_results,
         current_plan_results=execution_results,
     )
 
-    decision = await DeterministicDecisionEngine().decide(state)
+    decision = await DeterministicDecisionEngine().decide(context)
 
     assert decision.decision_type == "EXECUTE_ACTION"
     assert decision.action_id == "action-002"
@@ -102,13 +109,13 @@ async def test_decision_engine_completes_when_all_actions_succeed():
         ),
     ]
 
-    state = make_state(
+    context = make_context(
         actions=actions,
         execution_results=execution_results,
         current_plan_results=execution_results,
     )
 
-    decision = await DeterministicDecisionEngine().decide(state)
+    decision = await DeterministicDecisionEngine().decide(context)
 
     assert decision.decision_type == "COMPLETE"
     assert decision.action_id is None
@@ -134,13 +141,13 @@ async def test_decision_engine_requests_replan_after_failed_action():
         ),
     ]
 
-    state = make_state(
+    context = make_context(
         actions=actions,
         execution_results=execution_results,
         current_plan_results=execution_results,
     )
 
-    decision = await DeterministicDecisionEngine().decide(state)
+    decision = await DeterministicDecisionEngine().decide(context)
 
     assert decision.decision_type == "REPLAN"
     assert decision.action_id is None
@@ -149,9 +156,9 @@ async def test_decision_engine_requests_replan_after_failed_action():
 @pytest.mark.asyncio
 async def test_decision_engine_completes_without_actions():
 
-    state = make_state()
+    context = make_context()
 
-    decision = await DeterministicDecisionEngine().decide(state)
+    decision = await DeterministicDecisionEngine().decide(context)
 
     assert decision.decision_type == "COMPLETE"
 
@@ -159,9 +166,9 @@ async def test_decision_engine_completes_without_actions():
 @pytest.mark.asyncio
 async def test_decision_engine_replans_failed_task():
 
-    state = make_state(status="FAILED")
+    context = make_context(status="FAILED")
 
-    decision = await DeterministicDecisionEngine().decide(state)
+    decision = await DeterministicDecisionEngine().decide(context)
 
     assert decision.decision_type == "REPLAN"
 
@@ -182,13 +189,13 @@ async def test_decision_engine_replans_after_verification_failure():
         summary="Unit test failed.",
     )
 
-    state = make_state(
+    context = make_context(
         actions=actions,
     )
 
-    state.verification_result = verification_result
+    context.verification_result = verification_result
 
-    decision = await DeterministicDecisionEngine().decide(state)
+    decision = await DeterministicDecisionEngine().decide(context)
 
     assert decision.decision_type == "REPLAN"
     assert decision.action_id is None

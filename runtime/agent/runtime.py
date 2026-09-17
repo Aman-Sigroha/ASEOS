@@ -13,6 +13,7 @@ from runtime.decision.deterministic import DeterministicDecisionEngine
 from runtime.decision.engine import DecisionEngine
 from runtime.planner.replanner import Replanner
 from runtime.verification.verifier import Verifier
+from runtime.decision.context_builder import DecisionContextBuilder
 
 
 class AgentRuntime:
@@ -30,6 +31,7 @@ class AgentRuntime:
         replanner: Replanner | None = None,
         max_replans: int = 3,
         verifier: Verifier | None = None,
+        decision_context_builder: DecisionContextBuilder | None = None,
     ) -> None:
         self.understanding_service = understanding_service
         self.planner = planner
@@ -38,13 +40,15 @@ class AgentRuntime:
         if max_replans < 0:
             raise ValueError("max_replans cannot be negative.")
 
-        self.decision_engine = decision_engine or DeterministicDecisionEngine()
-
         self.replanner = replanner
         self.max_replans = max_replans
         self.decision_engine = decision_engine or DeterministicDecisionEngine()
         if event_emitter is not None and event_store is not None:
             raise ValueError("Provide either event_emitter or event_store, not both.")
+
+        self.decision_context_builder = (
+            decision_context_builder or DecisionContextBuilder()
+        )
 
         self.event_emitter = event_emitter or EventEmitter(event_store=event_store)
         self.verifier = verifier
@@ -132,7 +136,9 @@ class AgentRuntime:
         state.status = "EXECUTING"
 
         while True:
-            decision = await self.decision_engine.decide(state)
+            decision_context = self.decision_context_builder.build(state)
+
+            decision = await self.decision_engine.decide(decision_context)
 
             if decision.decision_type == "COMPLETE":
                 if self.verifier is None:
@@ -192,8 +198,37 @@ class AgentRuntime:
                     },
                 )
 
-                state.status = "EXECUTING"
+                if self.replanner is None:
+                    state.status = "FAILED"
 
+                    self._emit(
+                        task_id=state.task.id,
+                        event_type="TASK_FAILED",
+                        message=(
+                            "Task verification failed and replanning is not configured."
+                        ),
+                    )
+
+                    return state
+
+                if state.replan_count >= self.max_replans:
+                    state.status = "FAILED"
+
+                    self._emit(
+                        task_id=state.task.id,
+                        event_type="TASK_FAILED",
+                        message=(
+                            "Maximum replanning attempts reached after verification failure."
+                        ),
+                        data={
+                            "replan_count": state.replan_count,
+                            "max_replans": self.max_replans,
+                        },
+                    )
+
+                    return state
+
+                state.status = "EXECUTING"
                 continue
 
             if decision.decision_type == "REPLAN":
