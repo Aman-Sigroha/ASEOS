@@ -8,6 +8,9 @@ from runtime.schemas.task import Task
 from runtime.state.state import AgentState
 from runtime.task.understanding import TaskUnderstandingService
 from uuid import uuid4
+from runtime.decision.decision import Decision
+from runtime.decision.deterministic import DeterministicDecisionEngine
+from runtime.decision.engine import DecisionEngine
 
 
 class AgentRuntime:
@@ -21,11 +24,13 @@ class AgentRuntime:
         executor: ActionExecutor,
         event_emitter: EventEmitter | None = None,
         event_store: EventStore | None = None,
+        decision_engine: DecisionEngine | None = None,
     ) -> None:
         self.understanding_service = understanding_service
         self.planner = planner
         self.action_generator = action_generator
         self.executor = executor
+        self.decision_engine = decision_engine or DeterministicDecisionEngine()
         if event_emitter is not None and event_store is not None:
             raise ValueError("Provide either event_emitter or event_store, not both.")
 
@@ -105,47 +110,118 @@ class AgentRuntime:
         return state
 
     async def execute(self, state: AgentState) -> AgentState:
-        """Execute the prepared actions sequentially."""
-
         if state.status != "READY":
             raise ValueError(
                 f"Agent state must be READY before execution; "
                 f"current status is {state.status}."
             )
 
-        if not state.actions:
-            state.status = "COMPLETED"
-
-            self._emit(
-                task_id=state.task.id,
-                event_type="TASK_COMPLETED",
-                message="Task completed with no actions",
-            )
-
-            return state
-
         state.status = "EXECUTING"
 
-        for index, action in enumerate(state.actions):
-            state.current_action_index = index
+        while True:
+            decision = await self.decision_engine.decide(state)
+
+            if decision.decision_type == "COMPLETE":
+                state.current_action_index = len(state.actions)
+                state.status = "COMPLETED"
+
+                self._emit(
+                    task_id=state.task.id,
+                    event_type="TASK_COMPLETED",
+                    message="Task completed successfully",
+                )
+
+                return state
+
+            if decision.decision_type == "REPLAN":
+                state.status = "FAILED"
+
+                failed_action_id = (
+                    state.execution_results[-1].action_id
+                    if state.execution_results
+                    else None
+                )
+
+                self._emit(
+                    task_id=state.task.id,
+                    event_type="TASK_FAILED",
+                    action_id=failed_action_id,
+                    message=(
+                        "Decision engine requested replanning, "
+                        "but replanning is not yet implemented."
+                    ),
+                )
+
+                return state
+
+            if decision.decision_type == "ABORT":
+                state.status = "FAILED"
+
+                self._emit(
+                    task_id=state.task.id,
+                    event_type="TASK_FAILED",
+                    message="Task execution was aborted by the decision engine.",
+                )
+
+                return state
+
+            if decision.decision_type == "REQUEST_APPROVAL":
+                state.status = "FAILED"
+
+                self._emit(
+                    task_id=state.task.id,
+                    event_type="TASK_FAILED",
+                    message=(
+                        "Decision engine requested human approval, "
+                        "but approval handling is not yet implemented."
+                    ),
+                )
+
+                return state
+
+            if decision.decision_type != "EXECUTE_ACTION":
+                raise ValueError(f"Unsupported decision type: {decision.decision_type}")
+
+            if decision.action_id is None:
+                raise ValueError("EXECUTE_ACTION decision must contain an action_id.")
+
+            action_index = next(
+                (
+                    index
+                    for index, action in enumerate(state.actions)
+                    if action.id == decision.action_id
+                ),
+                None,
+            )
+
+            if action_index is None:
+                state.status = "FAILED"
+
+                self._emit(
+                    task_id=state.task.id,
+                    event_type="TASK_FAILED",
+                    message=(
+                        f"Decision referenced unknown action '{decision.action_id}'."
+                    ),
+                )
+
+                return state
+
+            action = state.actions[action_index]
+            state.current_action_index = action_index
 
             self._emit(
                 task_id=state.task.id,
                 event_type="ACTION_STARTED",
                 action_id=action.id,
                 message=f"Started {action.type}",
-                data={
-                    "action_type": action.type,
-                },
+                data={"action_type": action.type},
             )
 
             result = await self.executor.execute(action)
-
             state.execution_results.append(result)
 
             if not result.success:
-                state.status = "FAILED"
-
                 self._emit(
                     task_id=state.task.id,
                     event_type="ACTION_FAILED",
@@ -157,14 +233,9 @@ class AgentRuntime:
                     },
                 )
 
-                self._emit(
-                    task_id=state.task.id,
-                    event_type="TASK_FAILED",
-                    action_id=action.id,
-                    message="Task failed during execution",
-                )
-
-                return state
+                # Let the decision engine inspect the failed execution
+                # on the next loop iteration.
+                continue
 
             self._emit(
                 task_id=state.task.id,
@@ -176,17 +247,6 @@ class AgentRuntime:
                     "duration_ms": result.duration_ms,
                 },
             )
-
-        state.current_action_index = len(state.actions)
-        state.status = "COMPLETED"
-
-        self._emit(
-            task_id=state.task.id,
-            event_type="TASK_COMPLETED",
-            message="Task completed successfully",
-        )
-
-        return state
 
     async def run(
         self,
