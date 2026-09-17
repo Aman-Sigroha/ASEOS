@@ -1,0 +1,317 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+  background: #1e1e1e;
+  color: #d4d4d4;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+/* Main application */
+
+.app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Top bar */
+
+.topbar {
+  height: 52px;
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  background: #252526;
+  border-bottom: 1px solid #3e3e42;
+}
+
+.logo {
+  font-size: 18px;
+  font-weight: bold;
+  margin-right: 25px;
+}
+
+.repo-info {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+}
+
+.repo-name {
+  font-size: 14px;
+  font-weight: bold;
+}
+
+.repo-path {
+  font-size: 11px;
+  color: #858585;
+}
+
+.open-button {
+  background: #0e639c;
+  color: white;
+  border: none;
+  padding: 7px 12px;
+  border-radius: 4px;
+}
+
+.open-button:hover {
+  background: #1177bb;
+}
+
+/* Main workspace */
+
+.workspace {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 220px 1fr 300px;
+  min-height: 0;
+}
+
+/* File explorer */
+
+.file-explorer {
+  background: #252526;
+  border-right: 1px solid #3e3e42;
+  overflow-y: auto;
+}
+
+.panel-title {
+  padding: 12px;
+  font-size: 12px;
+  font-weight: bold;
+  color: #cccccc;
+  border-bottom: 1px solid #3e3e42;
+}
+
+.file-item {
+  padding: 7px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.file-item:hover {
+  background: #2a2d2e;
+}
+
+.file-item.active {
+  background: #37373d;
+  color: white;
+}
+
+.folder {
+  color: #cccccc;
+  font-weight: bold;
+}
+
+/* Code editor */
+
+.editor {
+  background: #1e1e1e;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.editor-header {
+  height: 36px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  background: #252526;
+  border-bottom: 1px solid #3e3e42;
+  font-size: 12px;
+}
+
+.editor-content {
+  flex: 1;
+  overflow: auto;
+  padding: 10px 0;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 14px;
+}
+
+.code-line {
+  display: flex;
+  min-height: 24px;
+  line-height: 24px;
+}
+
+.code-line .line-number {
+  width: 50px;
+  padding-right: 15px;
+  text-align: right;
+  color: #858585;
+  user-select: none;
+}
+
+.code-line .code {
+  white-space: pre;
+  color: #d4d4d4;
+}
+
+/* Task bar */
+
+.task-bar {
+  display: flex;
+  padding: 10px;
+  background: #252526;
+  border-top: 1px solid #3e3e42;
+}
+
+.task-bar input {
+  flex: 1;
+  background: #3c3c3c;
+  border: 1px solid #555;
+  color: #fff;
+  padding: 8px 10px;
+  outline: none;
+}
+
+.task-bar input:focus {
+  border-color: #007acc;
+}
+
+.run-button {
+  margin-left: 8px;
+  background: #0e639c;
+  color: white;
+  border: none;
+  padding: 8px 14px;
+  border-radius: 3px;
+}
+
+.run-button:hover {
+  background: #1177bb;
+}
+
+.run-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Agent activity */
+
+.agent-panel {
+  background: #252526;
+  border-left: 1px solid #3e3e42;
+  overflow-y: auto;
+}
+
+.agent-event {
+  padding: 8px 12px;
+  border-bottom: 1px solid #333;
+  font-size: 12px;
+}
+
+.event-number {
+  color: #858585;
+  margin-right: 8px;
+}
+
+.agent-status {
+  padding: 12px;
+  color: #4ec9b0;
+  font-size: 12px;
+}
+
+.empty-events {
+  color: #777;
+  padding: 10px 12px;
+}
+
+.status-dot.running {
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  0% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.3;
+  }
+
+  100% {
+    opacity: 1;
+  }
+}
+
+/* Bottom area */
+
+.bottom-panel {
+  height: 230px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  background: #1e1e1e;
+  border-top: 1px solid #3e3e42;
+}
+
+/* Diff */
+
+.diff-panel,
+.result-panel {
+  overflow: auto;
+}
+
+.diff-panel {
+  border-right: 1px solid #3e3e42;
+}
+
+.diff-content {
+  padding: 10px 14px;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 13px;
+}
+
+.diff-removed {
+  background: rgba(180, 60, 60, 0.25);
+  color: #f48771;
+  padding: 3px 6px;
+  margin-bottom: 2px;
+}
+
+.diff-added {
+  background: rgba(60, 160, 90, 0.25);
+  color: #89d185;
+  padding: 3px 6px;
+}
+
+/* Result */
+
+.result-content {
+  padding: 12px;
+  font-size: 13px;
+}
+
+.result-row {
+  margin-bottom: 8px;
+}
+
+.success {
+  color: #89d185;
+}
+
+.warning {
+  color: #dcdcaa;
+}
+
+/* Disabled */
+
+.task-bar input:disabled {
+  opacity: 0.7;
+}
