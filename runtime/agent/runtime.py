@@ -14,6 +14,10 @@ from runtime.decision.engine import DecisionEngine
 from runtime.planner.replanner import Replanner
 from runtime.verification.verifier import Verifier
 from runtime.decision.context_builder import DecisionContextBuilder
+from runtime.decision.validator import (
+    DecisionValidationError,
+    DecisionValidator,
+)
 
 
 class AgentRuntime:
@@ -32,6 +36,7 @@ class AgentRuntime:
         max_replans: int = 3,
         verifier: Verifier | None = None,
         decision_context_builder: DecisionContextBuilder | None = None,
+        decision_validator: DecisionValidator | None = None,
     ) -> None:
         self.understanding_service = understanding_service
         self.planner = planner
@@ -43,6 +48,7 @@ class AgentRuntime:
         self.replanner = replanner
         self.max_replans = max_replans
         self.decision_engine = decision_engine or DeterministicDecisionEngine()
+        self.decision_validator = decision_validator or DecisionValidator()
         if event_emitter is not None and event_store is not None:
             raise ValueError("Provide either event_emitter or event_store, not both.")
 
@@ -139,6 +145,28 @@ class AgentRuntime:
             decision_context = self.decision_context_builder.build(state)
 
             decision = await self.decision_engine.decide(decision_context)
+
+            try:
+                self.decision_validator.validate(
+                    decision=decision,
+                    context=decision_context,
+                    max_replans=self.max_replans,
+                )
+            except DecisionValidationError as exc:
+                state.status = "FAILED"
+
+                self._emit(
+                    task_id=state.task.id,
+                    event_type="TASK_FAILED",
+                    message="Decision validation failed.",
+                    data={
+                        "decision_type": decision.decision_type,
+                        "action_id": decision.action_id,
+                        "reason": str(exc),
+                    },
+                )
+
+                return state
 
             if decision.decision_type == "COMPLETE":
                 if self.verifier is None:

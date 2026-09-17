@@ -610,9 +610,17 @@ async def test_agent_runtime_uses_decision_engine():
                     confidence=1.0,
                 )
 
+            if self.calls == 2:
+                return Decision(
+                    decision_type="EXECUTE_ACTION",
+                    action_id="step-2",
+                    reason="Execute second action.",
+                    confidence=1.0,
+                )
+
             return Decision(
                 decision_type="COMPLETE",
-                reason="Execution is complete.",
+                reason="All planned actions are complete.",
                 confidence=1.0,
             )
 
@@ -640,9 +648,12 @@ async def test_agent_runtime_uses_decision_engine():
     state = await runtime.run(task, repository_context)
 
     assert state.status == "COMPLETED"
-    assert decision_engine.calls == 2
-    assert len(state.execution_results) == 1
-    assert state.execution_results[0].action_id == "step-1"
+    assert decision_engine.calls == 3
+    assert len(state.execution_results) == 2
+    assert [result.action_id for result in state.execution_results] == [
+        "step-1",
+        "step-2",
+    ]
 
 
 class RecordingReplanner:

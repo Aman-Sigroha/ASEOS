@@ -54,7 +54,36 @@ class MockLLMClient(LLMClient):
                     "verification_requirements": ["Run authentication tests"],
                 }
             )
+        if response_model.__name__ == "Decision":
+            execution_results = kwargs.get("execution_results", [])
 
+            if not execution_results:
+                return response_model.model_validate(
+                    {
+                        "decision_type": "EXECUTE_ACTION",
+                        "action_id": "step-1",
+                        "reason": "The search action should be executed first.",
+                        "confidence": 0.95,
+                    }
+                )
+
+            if len(execution_results) == 1:
+                return response_model.model_validate(
+                    {
+                        "decision_type": "EXECUTE_ACTION",
+                        "action_id": "step-2",
+                        "reason": "The calculator implementation should now be read.",
+                        "confidence": 0.95,
+                    }
+                )
+
+            return response_model.model_validate(
+                {
+                    "decision_type": "COMPLETE",
+                    "reason": "All planned actions have been executed successfully.",
+                    "confidence": 0.95,
+                }
+            )
         raise NotImplementedError(
             f"No mock structured response for {response_model.__name__}"
         )
