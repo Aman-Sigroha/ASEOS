@@ -19,8 +19,32 @@ class MockLLMClient(LLMClient):
         response_model: type[Any],
         **kwargs: Any,
     ) -> Any:
+        if response_model.__name__ == "Plan":
+            return response_model.model_validate(
+                {
+                    "task_id": "task-001",
+                    "goal": "Mock goal",
+                    "steps": [
+                        {
+                            "id": "step-1",
+                            "description": "Mock step",
+                        }
+                    ],
+                }
+            )
+
+        if response_model.__name__ == "TaskUnderstanding":
+            return response_model.model_validate(
+                {
+                    "goal": "Fix the login timeout bug",
+                    "expected_outcome": ("Authentication handles timeout correctly"),
+                    "constraints": ["Do not break existing authentication"],
+                    "verification_requirements": ["Run authentication tests"],
+                }
+            )
+
         raise NotImplementedError(
-            "Structured mock responses have not been implemented yet."
+            f"No mock structured response for {response_model.__name__}"
         )
 
     async def generate_with_tools(
