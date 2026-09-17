@@ -21,6 +21,10 @@ class TaskReplayState(BaseModel):
     failed_action_id: str | None = None
     event_count: int = Field(default=0, ge=0)
     last_event_type: str | None = None
+    verification_status: str | None = None
+    verification_summary: str | None = None
+    verification_check_count: int = Field(default=0, ge=0)
+    verification_attempts: int = Field(default=0, ge=0)
 
 
 class EventReplayer:
@@ -57,6 +61,20 @@ class EventReplayer:
                 state.status = "FAILED"
                 state.failed_action_id = event.action_id
                 state.current_action_id = None
+
+            elif event.event_type == "VERIFICATION_STARTED":
+                state.status = "RUNNING"
+                state.verification_attempts += 1
+
+            elif event.event_type == "VERIFICATION_COMPLETED":
+                state.verification_status = event.data.get("status")
+                state.verification_summary = event.data.get("summary")
+                state.verification_check_count = int(event.data.get("check_count", 0))
+
+            elif event.event_type == "VERIFICATION_FAILED":
+                state.verification_status = event.data.get("status")
+                state.verification_summary = event.data.get("summary")
+                state.verification_check_count = int(event.data.get("check_count", 0))
 
             elif event.event_type == "TASK_COMPLETED":
                 state.status = "COMPLETED"
