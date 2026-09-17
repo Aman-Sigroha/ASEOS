@@ -18,6 +18,7 @@ from runtime.task.understanding import TaskUnderstandingService
 from runtime.agent.executor import ActionExecutor
 from runtime.events.event import AgentEvent
 from runtime.events.emitter import EventEmitter
+from runtime.events.store import SQLiteEventStore
 
 
 class RecordingExecutor(ActionExecutor):
@@ -547,3 +548,38 @@ async def test_agent_runtime_emits_unique_event_ids():
     event_ids = [event.event_id for event in events]
 
     assert len(event_ids) == len(set(event_ids))
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_persists_events(tmp_path):
+    store = SQLiteEventStore(tmp_path / "events.db")
+
+    runtime = AgentRuntime(
+        understanding_service=TaskUnderstandingService(MockLLMClient()),
+        planner=Planner(MockLLMClient()),
+        action_generator=ActionGenerator(),
+        executor=MockActionExecutor(),
+        event_store=store,
+    )
+
+    task = Task(
+        id="task-001",
+        description="Fix calculator bug",
+        workspace_path="/workspace",
+    )
+
+    repository_context = RepositoryContext(
+        root="/workspace",
+        summary="Python calculator project",
+    )
+
+    state = await runtime.run(task, repository_context)
+
+    assert state.status == "COMPLETED"
+
+    events = store.get_task_events(task.id)
+
+    assert len(events) > 0
+    assert events[0].event_type == "TASK_STARTED"
+    assert events[-1].event_type == "TASK_COMPLETED"
+    assert all(event.task_id == task.id for event in events)

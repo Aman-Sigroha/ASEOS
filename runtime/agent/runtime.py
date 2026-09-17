@@ -1,5 +1,5 @@
 from runtime.agent.executor import ActionExecutor
-from runtime.events.emitter import EventEmitter
+from runtime.events.emitter import EventEmitter, EventStore
 from runtime.events.event import AgentEvent
 from runtime.planner.actions import ActionGenerator
 from runtime.planner.planner import Planner
@@ -20,12 +20,16 @@ class AgentRuntime:
         action_generator: ActionGenerator,
         executor: ActionExecutor,
         event_emitter: EventEmitter | None = None,
+        event_store: EventStore | None = None,
     ) -> None:
         self.understanding_service = understanding_service
         self.planner = planner
         self.action_generator = action_generator
         self.executor = executor
-        self.event_emitter = event_emitter or EventEmitter()
+        if event_emitter is not None and event_store is not None:
+            raise ValueError("Provide either event_emitter or event_store, not both.")
+
+        self.event_emitter = event_emitter or EventEmitter(event_store=event_store)
 
     def _emit(
         self,
