@@ -4,9 +4,8 @@ import httpx
 
 from runtime.llm.base import LLMClient
 
-
-class APIError(Exception):
-    """Raised when an LLM API request fails."""
+from runtime.llm.structured import parse_structured_response
+from runtime.llm.errors import APIError
 
 
 class APILLMClient(LLMClient):
@@ -76,7 +75,15 @@ class APILLMClient(LLMClient):
         response_model: type[Any],
         **kwargs: Any,
     ) -> Any:
-        raise NotImplementedError("Structured generation has not been implemented yet.")
+        content = await self.generate(
+            messages=messages,
+            **kwargs,
+        )
+
+        return parse_structured_response(
+            content,
+            response_model,
+        )
 
     async def generate_with_tools(
         self,

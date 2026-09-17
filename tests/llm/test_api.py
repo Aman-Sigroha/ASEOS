@@ -1,7 +1,10 @@
 import httpx
 import pytest
 
-from runtime.llm.api import APIError, APILLMClient
+from runtime.llm.api import APILLMClient
+from runtime.llm.errors import APIError
+
+from runtime.schemas.plan import Plan
 
 
 @pytest.mark.asyncio
@@ -118,3 +121,55 @@ async def test_generate_raises_api_error_on_invalid_response():
                 }
             ]
         )
+
+
+@pytest.mark.asyncio
+async def test_generate_structured_returns_pydantic_model():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": """
+                            {
+                                "task_id": "task-001",
+                                "goal": "Fix the division bug",
+                                "steps": [
+                                    {
+                                        "id": "step-1",
+                                        "description": "Find divide implementation"
+                                    }
+                                ]
+                            }
+                            """
+                        }
+                    }
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    llm = APILLMClient(
+        base_url="https://example.com",
+        api_key="test-key",
+        model="test-model",
+        transport=transport,
+    )
+
+    result = await llm.generate_structured(
+        messages=[
+            {
+                "role": "user",
+                "content": "Create a plan.",
+            }
+        ],
+        response_model=Plan,
+    )
+
+    assert isinstance(result, Plan)
+    assert result.task_id == "task-001"
+    assert result.goal == "Fix the division bug"
+    assert len(result.steps) == 1
