@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from typing import Protocol
 
 from runtime.events.event import AgentEvent
 
@@ -6,17 +7,21 @@ from runtime.events.event import AgentEvent
 EventHandler = Callable[[AgentEvent], None]
 
 
-class EventEmitter:
-    """In-memory event publisher for an agent run."""
+class EventStore(Protocol):
+    def append(self, event: AgentEvent) -> None: ...
 
-    def __init__(self) -> None:
+
+class EventEmitter:
+    def __init__(self, event_store: EventStore | None = None) -> None:
         self._handlers: list[EventHandler] = []
+        self._event_store = event_store
 
     def subscribe(self, handler: EventHandler) -> None:
-        """Register a handler that will receive emitted events."""
         self._handlers.append(handler)
 
     def emit(self, event: AgentEvent) -> None:
-        """Publish an event to all registered handlers."""
+        if self._event_store is not None:
+            self._event_store.append(event)
+
         for handler in self._handlers:
             handler(event)
