@@ -18,4 +18,4 @@ class Action(BaseModel):
 
     id: str = Field(min_length=1)
     type: ActionType
-    payload: dict
+    payload: dict = Field(default_factory=dict)

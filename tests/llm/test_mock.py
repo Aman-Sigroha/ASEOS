@@ -45,7 +45,17 @@ async def test_mock_llm_generate_plan():
     assert isinstance(result, Plan)
     assert result.task_id == "task-001"
     assert result.goal == "Mock goal"
-    assert len(result.steps) == 1
+    assert len(result.steps) == 2
+
+    assert result.steps[0].action_type == "SEARCH"
+    assert result.steps[0].parameters == {
+        "query": "divide",
+    }
+
+    assert result.steps[1].action_type == "READ"
+    assert result.steps[1].parameters == {
+        "path": "src/calculator.py",
+    }
 
 
 @pytest.mark.asyncio

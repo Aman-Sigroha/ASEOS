@@ -27,8 +27,20 @@ class MockLLMClient(LLMClient):
                     "steps": [
                         {
                             "id": "step-1",
-                            "description": "Mock step",
-                        }
+                            "description": "Search for the divide function",
+                            "action_type": "SEARCH",
+                            "parameters": {
+                                "query": "divide",
+                            },
+                        },
+                        {
+                            "id": "step-2",
+                            "description": "Read the calculator implementation",
+                            "action_type": "READ",
+                            "parameters": {
+                                "path": "src/calculator.py",
+                            },
+                        },
                     ],
                 }
             )

@@ -1,11 +1,17 @@
+from typing import Any
+
 from pydantic import BaseModel, Field
+
+from runtime.schemas.action import ActionType
 
 
 class PlanStep(BaseModel):
-    """A single step in an engineering plan."""
+    """A single structured step in an engineering plan."""
 
     id: str = Field(min_length=1)
     description: str = Field(min_length=1)
+    action_type: ActionType
+    parameters: dict[str, Any] = Field(default_factory=dict)
 
 
 class Plan(BaseModel):

@@ -13,7 +13,11 @@ def test_parse_valid_structured_response():
         "steps": [
             {
                 "id": "step-1",
-                "description": "Find the divide implementation"
+                "description": "Find the divide implementation",
+                "action_type": "SEARCH",
+                "parameters": {
+                    "query": "divide"
+                }
             }
         ]
     }

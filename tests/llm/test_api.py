@@ -139,7 +139,11 @@ async def test_generate_structured_returns_pydantic_model():
                                 "steps": [
                                     {
                                         "id": "step-1",
-                                        "description": "Find divide implementation"
+                                        "description": "Find divide implementation",
+                                        "action_type": "SEARCH",
+                                        "parameters": {
+                                            "query": "divide"
+                                        }
                                     }
                                 ]
                             }
