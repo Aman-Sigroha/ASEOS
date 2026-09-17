@@ -4,6 +4,7 @@ from runtime.schemas.plan import Plan
 from runtime.schemas.repository import RepositoryContext
 from runtime.schemas.task import Task
 from runtime.schemas.understanding import TaskUnderstanding
+from runtime.verification.result import VerificationResult
 
 
 class Replanner:
@@ -17,6 +18,7 @@ class Replanner:
         repository_context: RepositoryContext,
         current_plan: Plan,
         execution_results: list[ExecutionResult],
+        verification_result: VerificationResult | None = None,
     ) -> Plan:
         latest_result = execution_results[-1] if execution_results else None
 
@@ -25,8 +27,9 @@ class Replanner:
                 "role": "system",
                 "content": (
                     "You are an AI software engineering replanning agent. "
-                    "The current engineering plan could not be completed. "
-                    "Analyze the existing plan and execution evidence, "
+                    "The current engineering plan could not be completed or "
+                    "did not pass verification. Analyze the existing plan, "
+                    "execution evidence, and verification evidence, "
                     "identify what went wrong, and create a revised ordered "
                     "plan that attempts to accomplish the original task. "
                     "Avoid repeating the same failed approach when the "
@@ -55,6 +58,8 @@ class Replanner:
                     f"{[result.model_dump() for result in execution_results]}\n\n"
                     f"Latest execution result:\n"
                     f"{latest_result.model_dump_json() if latest_result else 'None'}"
+                    f"\n\nVerification result:\n"
+                    f"{verification_result.model_dump_json() if verification_result else 'None'}"
                 ),
             },
         ]

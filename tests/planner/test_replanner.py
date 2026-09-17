@@ -7,6 +7,10 @@ from runtime.schemas.plan import Plan, PlanStep
 from runtime.schemas.repository import RepositoryContext
 from runtime.schemas.task import Task
 from runtime.schemas.understanding import TaskUnderstanding
+from runtime.verification.result import (
+    VerificationCheck,
+    VerificationResult,
+)
 
 
 class RecordingLLM(LLMClient):
@@ -183,3 +187,46 @@ async def test_replanner_sends_repository_context_to_llm():
 
     assert "/workspace" in user_message
     assert "Python calculator project" in user_message
+
+
+@pytest.mark.asyncio
+async def test_replanner_sends_verification_failure_to_llm():
+
+    llm = RecordingLLM()
+    replanner = Replanner(llm)
+
+    execution_results = [
+        ExecutionResult(
+            action_id="step-1",
+            success=True,
+            exit_code=0,
+            duration_ms=10,
+        )
+    ]
+
+    verification_result = VerificationResult(
+        status="FAIL",
+        checks=[
+            VerificationCheck(
+                name="unit-tests",
+                status="FAIL",
+                message="test_divide_by_zero failed",
+            )
+        ],
+        summary="Verification failed.",
+    )
+
+    await replanner.replan(
+        task=make_task(),
+        understanding=make_understanding(),
+        repository_context=make_repository_context(),
+        current_plan=make_plan(),
+        execution_results=execution_results,
+        verification_result=verification_result,
+    )
+
+    user_message = llm.messages[-1]["content"]
+
+    assert "Verification result" in user_message
+    assert "test_divide_by_zero failed" in user_message
+    assert "Verification failed." in user_message
