@@ -181,8 +181,6 @@ class AgentRuntime:
 
                     return state
 
-                state.status = "FAILED"
-
                 self._emit(
                     task_id=state.task.id,
                     event_type="VERIFICATION_FAILED",
@@ -194,13 +192,9 @@ class AgentRuntime:
                     },
                 )
 
-                self._emit(
-                    task_id=state.task.id,
-                    event_type="TASK_FAILED",
-                    message="Task failed verification",
-                )
+                state.status = "EXECUTING"
 
-                return state
+                continue
 
             if decision.decision_type == "REPLAN":
                 if self.replanner is None:
@@ -254,6 +248,7 @@ class AgentRuntime:
                     repository_context=state.repository_context,
                     current_plan=state.plan,
                     execution_results=state.execution_results,
+                    verification_result=state.verification_result,
                 )
 
                 if new_plan.task_id != state.task.id:
@@ -276,6 +271,7 @@ class AgentRuntime:
 
                 state.current_action_index = 0
                 state.current_plan_results.clear()
+                state.verification_result = None
 
                 self._emit(
                     task_id=state.task.id,

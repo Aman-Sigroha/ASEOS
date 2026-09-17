@@ -657,6 +657,7 @@ class RecordingReplanner:
         repository_context,
         current_plan,
         execution_results,
+        verification_result=None,
     ):
         self.calls += 1
         self.execution_results = execution_results.copy()
@@ -1021,3 +1022,214 @@ async def test_agent_runtime_emits_verification_events():
     assert "VERIFICATION_COMPLETED" in event_types
 
     assert event_types[-1] == "TASK_COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_replans_after_verification_failure():
+
+    class RecoveryExecutor(ActionExecutor):
+        def __init__(self):
+            self.calls = 0
+
+        async def execute(self, action):
+            self.calls += 1
+
+            return ExecutionResult(
+                action_id=action.id,
+                success=True,
+                exit_code=0,
+                duration_ms=10,
+            )
+
+    class VerificationAwareVerifier(Verifier):
+        def __init__(self):
+            self.calls = 0
+
+        async def verify(self, state):
+            self.calls += 1
+
+            if self.calls == 1:
+                return VerificationResult(
+                    status="FAIL",
+                    checks=[
+                        VerificationCheck(
+                            name="unit-tests",
+                            status="FAIL",
+                            message="test_calculator failed",
+                        )
+                    ],
+                    summary="Initial verification failed.",
+                )
+
+            return VerificationResult(
+                status="PASS",
+                checks=[
+                    VerificationCheck(
+                        name="unit-tests",
+                        status="PASS",
+                        message="All tests passed.",
+                    )
+                ],
+                summary="Verification passed.",
+            )
+
+    class VerificationReplanner:
+        def __init__(self):
+            self.calls = 0
+            self.verification_results = []
+
+        async def replan(
+            self,
+            task,
+            understanding,
+            repository_context,
+            current_plan,
+            execution_results,
+            verification_result=None,
+        ):
+            self.calls += 1
+            self.verification_results.append(verification_result)
+
+            return Plan(
+                task_id=task.id,
+                goal="Recovered after verification failure",
+                steps=[
+                    PlanStep(
+                        id="replan-step-1",
+                        description="Apply corrected implementation",
+                        action_type="EDIT",
+                        parameters={
+                            "path": "src/calculator.py",
+                        },
+                    ),
+                ],
+            )
+
+    replanner = VerificationReplanner()
+    verifier = VerificationAwareVerifier()
+
+    runtime = AgentRuntime(
+        understanding_service=TaskUnderstandingService(MockLLMClient()),
+        planner=Planner(MockLLMClient()),
+        action_generator=ActionGenerator(),
+        executor=RecoveryExecutor(),
+        replanner=replanner,
+        verifier=verifier,
+    )
+
+    task = Task(
+        id="task-001",
+        description="Fix calculator bug",
+        workspace_path="/workspace",
+    )
+
+    repository_context = RepositoryContext(
+        root="/workspace",
+        summary="Python calculator project",
+    )
+
+    state = await runtime.run(
+        task,
+        repository_context,
+    )
+
+    assert state.status == "COMPLETED"
+
+    assert verifier.calls == 2
+    assert replanner.calls == 1
+    assert state.replan_count == 1
+
+    assert len(replanner.verification_results) == 1
+    assert replanner.verification_results[0] is not None
+    assert replanner.verification_results[0].status == "FAIL"
+
+    assert state.verification_result is not None
+    assert state.verification_result.status == "PASS"
+
+    assert len(state.execution_results) == 3
+    assert [result.action_id for result in state.execution_results] == [
+        "step-1",
+        "step-2",
+        "replan-step-1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_stops_after_max_verification_replans():
+
+    class AlwaysPassingExecutor(ActionExecutor):
+        async def execute(self, action):
+            return ExecutionResult(
+                action_id=action.id,
+                success=True,
+                exit_code=0,
+            )
+
+    class AlwaysFailingVerifier(Verifier):
+        async def verify(self, state):
+            return VerificationResult(
+                status="FAIL",
+                summary="Verification always fails.",
+            )
+
+    class CountingReplanner:
+        def __init__(self):
+            self.calls = 0
+
+        async def replan(
+            self,
+            task,
+            understanding,
+            repository_context,
+            current_plan,
+            execution_results,
+            verification_result=None,
+        ):
+            self.calls += 1
+
+            return Plan(
+                task_id=task.id,
+                goal="Another attempt",
+                steps=[
+                    PlanStep(
+                        id=f"replan-step-{self.calls}",
+                        description="Try another implementation",
+                        action_type="EDIT",
+                        parameters={},
+                    )
+                ],
+            )
+
+    replanner = CountingReplanner()
+
+    runtime = AgentRuntime(
+        understanding_service=TaskUnderstandingService(MockLLMClient()),
+        planner=Planner(MockLLMClient()),
+        action_generator=ActionGenerator(),
+        executor=AlwaysPassingExecutor(),
+        replanner=replanner,
+        verifier=AlwaysFailingVerifier(),
+        max_replans=2,
+    )
+
+    task = Task(
+        id="task-001",
+        description="Fix calculator bug",
+        workspace_path="/workspace",
+    )
+
+    repository_context = RepositoryContext(
+        root="/workspace",
+        summary="Python calculator project",
+    )
+
+    state = await runtime.run(
+        task,
+        repository_context,
+    )
+
+    assert state.status == "FAILED"
+    assert state.replan_count == 2
+    assert replanner.calls == 2
+    assert state.verification_result is not None
+    assert state.verification_result.status == "FAIL"

@@ -5,6 +5,7 @@ from runtime.schemas.action import Action
 from runtime.schemas.execution import ExecutionResult
 from runtime.schemas.task import Task
 from runtime.state.state import AgentState
+from runtime.verification.result import VerificationResult
 
 
 def make_state(
@@ -163,3 +164,31 @@ async def test_decision_engine_replans_failed_task():
     decision = await DeterministicDecisionEngine().decide(state)
 
     assert decision.decision_type == "REPLAN"
+
+
+@pytest.mark.asyncio
+async def test_decision_engine_replans_after_verification_failure():
+
+    actions = [
+        Action(
+            id="action-001",
+            type="EDIT",
+            payload={"path": "src/calculator.py"},
+        ),
+    ]
+
+    verification_result = VerificationResult(
+        status="FAIL",
+        summary="Unit test failed.",
+    )
+
+    state = make_state(
+        actions=actions,
+    )
+
+    state.verification_result = verification_result
+
+    decision = await DeterministicDecisionEngine().decide(state)
+
+    assert decision.decision_type == "REPLAN"
+    assert decision.action_id is None

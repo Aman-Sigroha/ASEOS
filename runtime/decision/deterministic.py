@@ -19,6 +19,16 @@ class DeterministicDecisionEngine(DecisionEngine):
                 confidence=1.0,
             )
 
+        if (
+            state.verification_result is not None
+            and state.verification_result.status != "PASS"
+        ):
+            return Decision(
+                decision_type="REPLAN",
+                reason="Task verification failed and requires replanning.",
+                confidence=1.0,
+            )
+
         if not state.actions:
             return Decision(
                 decision_type="COMPLETE",
