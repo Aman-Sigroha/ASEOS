@@ -9,6 +9,7 @@ from runtime.decision.validator import (
 from runtime.schemas.action import Action
 from runtime.schemas.execution import ExecutionResult
 from runtime.schemas.understanding import TaskUnderstanding
+from runtime.tools.registry import ToolDefinition
 
 
 def make_context(
@@ -256,3 +257,53 @@ def test_validator_accepts_request_approval():
     )
 
     validator.validate(decision, context)
+
+
+def test_validator_accepts_action_with_registered_tool():
+    validator = DecisionValidator()
+
+    context = make_context()
+
+    context.available_tools = [
+        ToolDefinition(
+            name="search",
+            description="Search repository.",
+            action_type="SEARCH",
+        ),
+    ]
+
+    decision = Decision(
+        decision_type="EXECUTE_ACTION",
+        action_id="step-1",
+        reason="Execute the search action.",
+        confidence=0.95,
+    )
+
+    validator.validate(decision, context)
+
+
+def test_validator_rejects_action_without_registered_tool():
+    validator = DecisionValidator()
+
+    context = make_context()
+
+    context.available_tools = [
+        ToolDefinition(
+            name="read",
+            description="Read repository files.",
+            action_type="READ",
+        ),
+    ]
+
+    decision = Decision(
+        decision_type="EXECUTE_ACTION",
+        action_id="step-1",
+        reason="Execute the search action.",
+        confidence=0.95,
+    )
+
+    with pytest.raises(
+        DecisionValidationError,
+        match="No enabled tool is available",
+    ):
+        validator.validate(decision, context)

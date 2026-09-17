@@ -103,6 +103,7 @@ class LLMDecisionEngine(DecisionEngine):
             f"Repository summary:\n{context.repository_summary}\n\n"
             f"Plan goal:\n{context.plan_goal}\n\n"
             f"Available actions:\n{context.actions}\n\n"
+            f"Available tools:\n{context.available_tools}\n\n"
             f"Current action index:\n{context.current_action_index}\n\n"
             f"Execution results:\n{context.execution_results}\n\n"
             f"Current plan execution results:\n"

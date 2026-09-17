@@ -18,6 +18,7 @@ from runtime.decision.validator import (
     DecisionValidationError,
     DecisionValidator,
 )
+from runtime.decision.policy import DecisionPolicy
 
 
 class AgentRuntime:
@@ -37,6 +38,7 @@ class AgentRuntime:
         verifier: Verifier | None = None,
         decision_context_builder: DecisionContextBuilder | None = None,
         decision_validator: DecisionValidator | None = None,
+        decision_policy: DecisionPolicy | None = None,
     ) -> None:
         self.understanding_service = understanding_service
         self.planner = planner
@@ -49,6 +51,7 @@ class AgentRuntime:
         self.max_replans = max_replans
         self.decision_engine = decision_engine or DeterministicDecisionEngine()
         self.decision_validator = decision_validator or DecisionValidator()
+        self.decision_policy = decision_policy or DecisionPolicy()
         if event_emitter is not None and event_store is not None:
             raise ValueError("Provide either event_emitter or event_store, not both.")
 
@@ -163,6 +166,28 @@ class AgentRuntime:
                         "decision_type": decision.decision_type,
                         "action_id": decision.action_id,
                         "reason": str(exc),
+                    },
+                )
+
+                return state
+
+            policy_result = self.decision_policy.evaluate(
+                decision=decision,
+                context=decision_context,
+            )
+
+            if policy_result.status == "REQUEST_APPROVAL":
+                state.status = "FAILED"
+
+                self._emit(
+                    task_id=state.task.id,
+                    event_type="TASK_FAILED",
+                    action_id=decision.action_id,
+                    message="Decision requires human approval.",
+                    data={
+                        "decision_type": decision.decision_type,
+                        "action_id": decision.action_id,
+                        "reason": policy_result.reason,
                     },
                 )
 

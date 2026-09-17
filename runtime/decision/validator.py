@@ -1,5 +1,6 @@
 from runtime.decision.context import DecisionContext
 from runtime.decision.decision import Decision
+from runtime.tools.registry import ToolRegistry
 
 
 class DecisionValidationError(ValueError):
@@ -68,6 +69,17 @@ class DecisionValidator:
                 f"EXECUTE_ACTION referenced '{decision.action_id}', "
                 f"but the next valid action is '{expected_action.id}'."
             )
+        if context.available_tools:
+            tool_available = any(
+                tool.action_type == expected_action.type and tool.enabled
+                for tool in context.available_tools
+            )
+
+            if not tool_available:
+                raise DecisionValidationError(
+                    f"No enabled tool is available for action type "
+                    f"'{expected_action.type}'."
+                )
 
     def _validate_complete(self, context: DecisionContext) -> None:
         if len(context.current_plan_results) < len(context.actions):

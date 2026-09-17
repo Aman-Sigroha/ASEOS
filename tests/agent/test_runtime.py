@@ -27,6 +27,7 @@ from runtime.verification.result import (
     VerificationResult,
 )
 from runtime.verification.verifier import Verifier
+from runtime.decision.llm import LLMDecisionEngine
 
 
 class RecordingExecutor(ActionExecutor):
@@ -1244,3 +1245,136 @@ async def test_agent_runtime_stops_after_max_verification_replans():
     assert replanner.calls == 2
     assert state.verification_result is not None
     assert state.verification_result.status == "FAIL"
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_blocks_low_confidence_llm_decision():
+    class LowConfidenceDecisionLLM(MockLLMClient):
+        async def generate_structured(
+            self,
+            messages,
+            response_model,
+            **kwargs,
+        ):
+            if response_model.__name__ == "Decision":
+                return response_model.model_validate(
+                    {
+                        "decision_type": "EXECUTE_ACTION",
+                        "action_id": "step-1",
+                        "reason": "The model is uncertain.",
+                        "confidence": 0.20,
+                    }
+                )
+
+            return await super().generate_structured(
+                messages=messages,
+                response_model=response_model,
+                **kwargs,
+            )
+
+    llm = LowConfidenceDecisionLLM()
+
+    executor = MockActionExecutor()
+
+    runtime = AgentRuntime(
+        understanding_service=TaskUnderstandingService(llm),
+        planner=Planner(llm),
+        action_generator=ActionGenerator(),
+        executor=executor,
+        decision_engine=LLMDecisionEngine(llm),
+    )
+
+    task = Task(
+        id="task-001",
+        description="Fix the calculator bug",
+        workspace_path="/workspace",
+    )
+
+    repository_context = RepositoryContext(
+        root="/workspace",
+        summary="Python calculator project",
+    )
+
+    state = await runtime.run(
+        task=task,
+        repository_context=repository_context,
+    )
+
+    assert state.status == "FAILED"
+    assert state.execution_results == []
+    assert executor.executed_actions == []
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_blocks_high_risk_action():
+    class HighRiskDecisionLLM(MockLLMClient):
+        async def generate_structured(
+            self,
+            messages,
+            response_model,
+            **kwargs,
+        ):
+            if response_model.__name__ == "Decision":
+                return response_model.model_validate(
+                    {
+                        "decision_type": "EXECUTE_ACTION",
+                        "action_id": "step-3",
+                        "reason": "Run the project command.",
+                        "confidence": 0.99,
+                    }
+                )
+
+            if response_model.__name__ == "Plan":
+                return response_model.model_validate(
+                    {
+                        "task_id": "task-001",
+                        "goal": "Run the project command.",
+                        "steps": [
+                            {
+                                "id": "step-3",
+                                "description": "Run project command.",
+                                "action_type": "RUN_COMMAND",
+                                "parameters": {
+                                    "command": "pytest",
+                                },
+                            }
+                        ],
+                    }
+                )
+
+            return await super().generate_structured(
+                messages=messages,
+                response_model=response_model,
+                **kwargs,
+            )
+
+    llm = HighRiskDecisionLLM()
+    executor = MockActionExecutor()
+
+    runtime = AgentRuntime(
+        understanding_service=TaskUnderstandingService(llm),
+        planner=Planner(llm),
+        action_generator=ActionGenerator(),
+        executor=executor,
+        decision_engine=LLMDecisionEngine(llm),
+    )
+
+    task = Task(
+        id="task-001",
+        description="Run the project tests.",
+        workspace_path="/workspace",
+    )
+
+    repository_context = RepositoryContext(
+        root="/workspace",
+        summary="Python project",
+    )
+
+    state = await runtime.run(
+        task=task,
+        repository_context=repository_context,
+    )
+
+    assert state.status == "FAILED"
+    assert state.execution_results == []
+    assert executor.executed_actions == []

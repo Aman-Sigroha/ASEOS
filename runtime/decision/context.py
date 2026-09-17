@@ -4,6 +4,7 @@ from runtime.schemas.action import Action
 from runtime.schemas.execution import ExecutionResult
 from runtime.schemas.understanding import TaskUnderstanding
 from runtime.verification.result import VerificationResult
+from runtime.tools.registry import ToolDefinition
 
 
 class DecisionContext(BaseModel):
@@ -16,6 +17,7 @@ class DecisionContext(BaseModel):
 
     plan_goal: str = Field(min_length=1)
     actions: list[Action] = Field(default_factory=list)
+    available_tools: list[ToolDefinition] = Field(default_factory=list)
 
     current_action_index: int = Field(default=0, ge=0)
 
