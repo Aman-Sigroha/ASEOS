@@ -2,13 +2,25 @@ from runtime.decision.context import DecisionContext
 from runtime.decision.decision import Decision
 from runtime.decision.engine import DecisionEngine
 from runtime.llm.base import LLMClient
+from runtime.llm.router import ModelRouter, RoutingRequest
 
 
 class LLMDecisionEngine(DecisionEngine):
     """Uses an LLM to decide the next step in the agent loop."""
 
-    def __init__(self, llm: LLMClient) -> None:
+    def __init__(
+        self,
+        llm: LLMClient | None = None,
+        router: ModelRouter | None = None,
+    ) -> None:
+        if llm is None and router is None:
+            raise ValueError("Either llm or router must be provided.")
+
+        if llm is not None and router is not None:
+            raise ValueError("Provide either llm or router, not both.")
+
         self.llm = llm
+        self.router = router
 
     async def decide(self, context: DecisionContext) -> Decision:
         messages = [
@@ -41,10 +53,42 @@ class LLMDecisionEngine(DecisionEngine):
             },
         ]
 
-        return await self.llm.generate_structured(
+        llm = self.llm
+
+        if self.router is not None:
+            llm = self.router.route(
+                RoutingRequest(
+                    purpose="DECISION",
+                    complexity=self._determine_complexity(context),
+                    requires_tools=False,
+                )
+            )
+
+        if llm is None:
+            raise RuntimeError("No LLM client is available.")
+
+        return await llm.generate_structured(
             messages=messages,
             response_model=Decision,
         )
+
+    def _determine_complexity(
+        self,
+        context: DecisionContext,
+    ) -> str:
+        if context.verification_result is not None:
+            return "HIGH"
+
+        if context.current_plan_results:
+            last_result = context.current_plan_results[-1]
+
+            if not last_result.success:
+                return "HIGH"
+
+        if len(context.actions) > 5:
+            return "HIGH"
+
+        return "MEDIUM"
 
     def _build_context(self, context: DecisionContext) -> str:
         return (
