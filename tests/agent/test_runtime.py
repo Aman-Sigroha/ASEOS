@@ -673,6 +673,85 @@ class RecordingReplanner:
 
 
 @pytest.mark.asyncio
+async def test_agent_runtime_persists_replanning_lifecycle(tmp_path):
+    class RecoveryExecutor(ActionExecutor):
+        def __init__(self):
+            self.calls = 0
+
+        async def execute(self, action):
+            self.calls += 1
+
+            if self.calls == 1:
+                return ExecutionResult(
+                    action_id=action.id,
+                    success=False,
+                    stderr="Initial approach failed",
+                    exit_code=1,
+                    duration_ms=10,
+                )
+
+            return ExecutionResult(
+                action_id=action.id,
+                success=True,
+                exit_code=0,
+                duration_ms=10,
+            )
+
+    store = SQLiteEventStore(tmp_path / "events.db")
+    replanner = RecordingReplanner()
+
+    runtime = AgentRuntime(
+        understanding_service=TaskUnderstandingService(MockLLMClient()),
+        planner=Planner(MockLLMClient()),
+        action_generator=ActionGenerator(),
+        executor=RecoveryExecutor(),
+        replanner=replanner,
+        event_store=store,
+    )
+
+    task = Task(
+        id="task-001",
+        description="Fix calculator bug",
+        workspace_path="/workspace",
+    )
+
+    repository_context = RepositoryContext(
+        root="/workspace",
+        summary="Python calculator project",
+    )
+
+    state = await runtime.run(
+        task,
+        repository_context,
+    )
+
+    assert state.status == "COMPLETED"
+
+    events = store.get_task_events(task.id)
+
+    assert [event.event_type for event in events] == [
+        "TASK_STARTED",
+        "TASK_UNDERSTANDING_COMPLETED",
+        "PLAN_CREATED",
+        "ACTION_STARTED",
+        "ACTION_FAILED",
+        "PLAN_CREATED",
+        "ACTION_STARTED",
+        "ACTION_COMPLETED",
+        "TASK_COMPLETED",
+    ]
+
+    replanned_event = events[5]
+
+    assert replanned_event.event_type == "PLAN_CREATED"
+    assert replanned_event.data["replanned"] is True
+    assert replanned_event.data["replan_count"] == 1
+
+    assert events[4].action_id == events[3].action_id
+    assert events[6].action_id == "replan-step-1"
+
+
+@pytest.mark.asyncio
 async def test_agent_runtime_replans_after_failed_action():
     class RecoveryExecutor(ActionExecutor):
         def __init__(self):
