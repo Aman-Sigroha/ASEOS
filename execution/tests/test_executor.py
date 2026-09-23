@@ -1,0 +1,31 @@
+from pathlib import Path
+
+from execution.executor import execute_task
+
+
+def test_execute_task():
+    repo_path = str(
+        Path("fixtures/repositories/calculator").resolve()
+    )
+
+    patch = {
+        "file": "calculator.py",
+        "old": "return a * b",
+        "new": "return a / b",
+    }
+
+    result = execute_task(
+        repo_path=repo_path,
+        task_id="test-executor",
+        patch=patch,
+    )
+
+    assert result["status"] == "PASS"
+
+    assert result["patch"]["status"] == "PASS"
+
+    assert result["tests"]["status"] == "PASS"
+
+    assert "calculator.py" in result["diff"]
+
+    assert "return a / b" in result["diff"]
