@@ -518,6 +518,17 @@ class WriteTool(Tool):
             raise ToolError("INVALID_ARGUMENTS", "Path is a directory")
 
         previous_sha = self._check_expected_version(target, args)
+        context.operation.checkpoint(
+            "files",
+            files=[
+                {
+                    "path": args.path,
+                    "kind": "create" if previous_sha is None else "modify",
+                    "before": previous_sha,
+                    "after": sha256_hex(payload),
+                }
+            ],
+        )
 
         target.parent.mkdir(parents=True, exist_ok=True)
         self._atomic_write(target, payload, previous_sha)

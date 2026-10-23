@@ -103,8 +103,8 @@ through the `git.*` tools.
   executed. Mitigation is review of the worktree diff before merge, not prevention.
 - Git hooks and signing settings of the repository still run on `git.commit`.
 - Artifacts (command logs, reports, patches, records) are plain files under the repository's `.git/aseos/artifacts` (or a temp folder for non-Git directories), readable by anything running as the same OS user and not encrypted. Redaction before storage is best-effort pattern matching; a secret without a recognizable shape and without an environment entry is stored as-is. Retention is enforced on read and by `store.gc()`, which the host must schedule.
-- Time-of-check/time-of-use gaps remain between a path check and the file operation (tiny, but not zero) because no
-  file-system locking is used.
+- Time-of-check/time-of-use gaps remain between a path check and the file operation (tiny, but not zero). Concurrent changes to one workspace are serialized within a gateway and, for managed worktrees (or `lease=True`), across gateways by a write lease; other workspaces have no cross-process exclusion.
+- Recovery state (leases, the operations journal) is plain files next to the repository; anything running as the same OS user can alter it. Orphan termination requires a matching process creation token, which exists on Windows and Linux only.
 - Disk usage inside a workspace is not limited.
 
 ## 7. Execution levels and profiles
@@ -167,3 +167,5 @@ gateway = ExecutionGateway(
 | Levels, profiles, no privilege escalation by payload | `test_profiles_and_isolation.py` |
 | Cross-task / cross-workspace | `test_profiles_and_isolation.py`, `test_path_security.py` |
 | Cleanup scope, user-work preservation | `test_worktree_manager.py`, `test_git_mutations.py` |
+| Write leases, takeover, recycled pids, orphan termination only on verified identity | `test_recovery_primitives.py`, `test_concurrency_and_crash.py` |
+| Crash at an exact point: patch/write/commit/command, no double application | `test_concurrency_and_crash.py` |

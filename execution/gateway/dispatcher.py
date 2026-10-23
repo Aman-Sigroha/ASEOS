@@ -1,6 +1,7 @@
 import asyncio
 import threading
 import time
+import uuid
 from pathlib import Path
 from collections.abc import Callable
 from typing import Any
@@ -22,7 +23,12 @@ from execution.artifacts.store import (
     default_store_for,
     workspace_id,
 )
+from execution.git.repo import GitError, run_git
+from execution.recovery.lease import LeaseConflict, LeaseLost, WorkspaceLease
+from execution.recovery.locations import state_dir_for
+from execution.recovery.ops import JournalError, NullOperation, OperationsLog
 from execution.security.levels import PROFILES, ExecutionLevel, Profile
+from execution.security.paths import MANAGED_AREA
 from execution.gateway.tool import (
     Tool,
     ToolContext,
@@ -53,6 +59,12 @@ class ExecutionGateway:
         artifact_store: ArtifactStore | bool | None = None,
         task_id: str | None = None,
         record_reads: bool = False,
+        lease: bool | None = None,
+        journal: bool = True,
+        require_journal: bool = False,
+        state_dir: Path | str | None = None,
+        owner_id: str | None = None,
+        mutation_wait_seconds: float = 60.0,
     ) -> None:
         self.workspace = Path(workspace_path).resolve()
         self.task_id = task_id
@@ -66,6 +78,19 @@ class ExecutionGateway:
             artifact_store if isinstance(artifact_store, ArtifactStore) else None
         )
         self.store_error: str | None = None
+        # Concurrency and recovery. `lease=None` means: an exclusive write
+        # lease for managed worktrees (one task owns one worktree), none
+        # elsewhere; True/False force it.
+        self.owner_id = owner_id or f"gw-{uuid.uuid4().hex[:12]}"
+        self.mutation_wait_seconds = mutation_wait_seconds
+        self.journal_enabled = journal
+        self.require_journal = require_journal
+        self._state_dir_arg = Path(state_dir) if state_dir is not None else None
+        self._state_dir: Path | None = None
+        self._lease_setting = lease
+        self._lease: WorkspaceLease | None = None
+        self._ops: OperationsLog | None = None
+        self._mutation_locks: dict[int, asyncio.Lock] = {}
 
         if not self.workspace.is_dir():
             raise ValueError(
@@ -118,6 +143,215 @@ class ExecutionGateway:
                 self.store_error = str(exc)
 
         return self._store
+
+    @property
+    def state_dir(self) -> Path:
+        """Where leases and the operations journal live (opened on first use)."""
+
+        if self._state_dir is None:
+            self._state_dir = self._state_dir_arg or state_dir_for(self.workspace)
+
+        return self._state_dir
+
+    @property
+    def lease_enabled(self) -> bool:
+        if self._lease_setting is not None:
+            return self._lease_setting
+
+        return MANAGED_AREA in {part.lower() for part in self.workspace.parts}
+
+    @property
+    def operations(self) -> OperationsLog | None:
+        if not self.journal_enabled:
+            return None
+
+        if self._ops is None:
+            self._ops = OperationsLog(self.state_dir)
+
+        return self._ops
+
+    def release_lease(self) -> None:
+        if self._lease is not None:
+            self._lease.release()
+
+    def _ensure_lease(self) -> None:
+        if not self.lease_enabled:
+            return
+
+        if self._lease is None:
+            self._lease = WorkspaceLease(
+                self.state_dir, self.workspace, owner_id=self.owner_id, task_id=self.task_id
+            )
+
+        try:
+            self._lease.acquire()
+        except LeaseConflict as exc:
+            holder = exc.holder
+            raise ToolError(
+                "WORKSPACE_UNAVAILABLE",
+                str(exc),
+                data={
+                    "lease_conflict": True,
+                    "holder": {
+                        k: holder.get(k)
+                        for k in ("owner_id", "pid", "host", "task_id", "heartbeat_age_seconds")
+                    },
+                },
+            ) from exc
+        except LeaseLost as exc:
+            raise ToolError("WORKSPACE_UNAVAILABLE", str(exc), data={"lease_lost": True}) from exc
+        except OSError as exc:
+            raise ToolError(
+                "WORKSPACE_UNAVAILABLE", f"Cannot take the workspace lease: {exc}"
+            ) from exc
+
+    def recover(self, *, terminate_orphans: bool = False) -> dict[str, Any]:
+        """Inspect (and only report on) what an earlier crash or interruption
+        left behind for this workspace.
+
+        Sections: `operations` (journaled actions classified against the real
+        files/HEAD/processes; interrupted ones are marked, never re-run),
+        `leases` (stale write leases), `artifacts` (orphaned or missing
+        blobs), `worktrees` (missing or unrecorded worktrees, when this
+        workspace is a repository root). With `terminate_orphans`, a child
+        process of a dead owner is stopped, but only when its identity (pid +
+        creation time) is verified. Nothing is deleted or re-executed.
+        """
+
+        from execution.recovery.lease import all_leases, read_lease
+        from execution.recovery.reconcile import reconcile_operations
+
+        report: dict[str, Any] = {"workspace": str(self.workspace)}
+
+        def section(name: str, produce: Callable[[], Any]) -> None:
+            try:
+                report[name] = produce()
+            except Exception as exc:  # one failing section must not hide the others
+                report[name] = {"error": f"{type(exc).__name__}: {exc}"}
+
+        store = self.artifact_store
+
+        def operations() -> Any:
+            log = self.operations
+
+            if log is None:
+                return {"enabled": False}
+
+            finished = None
+
+            if store is not None:
+                finished = {
+                    m.action_id
+                    for m in store.find(workspace=self.workspace_id, kind="execution_record", limit=100_000)
+                    if m.action_id
+                }
+
+            return reconcile_operations(
+                log,
+                self.workspace,
+                self_owner_id=self.owner_id,
+                finished_actions=finished,
+                terminate_orphans=terminate_orphans,
+            )
+
+        def leases() -> Any:
+            return {
+                "this_workspace": read_lease(self.state_dir, self.workspace),
+                "stale": [lease for lease in all_leases(self.state_dir) if lease["stale"]],
+            }
+
+        def worktrees() -> Any:
+            from execution.worktrees.manager import WorktreeManager
+
+            if MANAGED_AREA in {part.lower() for part in self.workspace.parts}:
+                return {"skipped": "inside a managed worktree"}
+
+            return WorktreeManager(self.workspace).reconcile()
+
+        section("operations", operations)
+        section("leases", leases)
+        section("artifacts", lambda: store.audit() if store else {"enabled": False})
+        section("worktrees", worktrees)
+        interrupted = report.get("operations", {}).get("interrupted", []) if isinstance(report.get("operations"), dict) else []
+        report["needs_attention"] = bool(interrupted)
+        return report
+
+    def _mutation_lock(self) -> asyncio.Lock:
+        key = id(asyncio.get_running_loop())
+        return self._mutation_locks.setdefault(key, asyncio.Lock())
+
+    def _head_sha(self) -> str | None:
+        try:
+            return run_git(self.workspace, ["rev-parse", "HEAD"], timeout=10).stdout.strip() or None
+        except (GitError, OSError):
+            return None
+
+    async def _run_mutating(
+        self, tool: Tool, args, action: Action, sink: ArtifactSink | NullSink
+    ) -> ToolOutput:
+        """One state-changing action at a time per workspace, under the
+        workspace lease, with its intent journaled before it starts."""
+
+        lock = self._mutation_lock() if tool.spec.serialize else None
+
+        if lock is not None:
+            try:
+                await asyncio.wait_for(lock.acquire(), self.mutation_wait_seconds)
+            except asyncio.TimeoutError:
+                raise ToolError(
+                    "TIMEOUT",
+                    f"Waited {self.mutation_wait_seconds:g}s for another change to this "
+                    "workspace to finish.",
+                ) from None
+
+        try:
+            self._ensure_lease()
+            handle: Any = NullOperation()
+            log = self.operations
+
+            if log is not None:
+                head = await asyncio.to_thread(self._head_sha)
+                digest, summary = summarize_args(action.payload)
+
+                try:
+                    handle = log.begin(
+                        action_id=action.id,
+                        action_type=action.type,
+                        tool=tool.spec.name,
+                        workspace=self.workspace,
+                        owner_id=self.owner_id,
+                        task_id=self.task_id,
+                        args_sha256=digest,
+                        args=summary,
+                        head_before=head,
+                    )
+                except JournalError as exc:
+                    if self.require_journal:
+                        raise ToolError(
+                            "RESOURCE_LIMIT",
+                            f"{exc}; refusing to change the workspace without a recorded intent.",
+                            data={"journal_error": str(exc)},
+                        ) from exc
+
+                    sink.errors.append(f"journal: {exc}")
+
+            try:
+                output = await self._run(tool, args, action, sink, handle)
+            except ToolError as error:
+                if handle.errors:
+                    error.data = {**error.data, "journal_errors": list(handle.errors)}
+
+                raise
+            finally:
+                handle.finish()
+
+            if handle.errors:
+                output.data["journal_errors"] = list(handle.errors)
+
+            return output
+        finally:
+            if lock is not None:
+                lock.release()
 
     def _sink(self, action: Action, tool_name: str | None) -> ArtifactSink | NullSink:
         store = self.artifact_store
@@ -181,7 +415,11 @@ class ExecutionGateway:
 
             self._check_capabilities(tool)
             args = self._validate_args(tool, action.payload)
-            output = await self._run(tool, args, action, sink)
+            if tool.spec.read_only:
+                output = await self._run(tool, args, action, sink)
+            else:
+                output = await self._run_mutating(tool, args, action, sink)
+
             result = self._result(action, tool_name, started, output=output)
 
         except ToolError as error:
@@ -366,7 +604,12 @@ class ExecutionGateway:
             ) from exc
 
     async def _run(
-        self, tool: Tool, args, action: Action, sink: ArtifactSink | NullSink
+        self,
+        tool: Tool,
+        args,
+        action: Action,
+        sink: ArtifactSink | NullSink,
+        operation: Any = None,
     ) -> ToolOutput:
         cancel = threading.Event()
         context = ToolContext(
@@ -378,6 +621,7 @@ class ExecutionGateway:
             require_sandbox=self.require_sandbox,
             cancel=cancel,
             artifacts=sink,
+            operation=operation if operation is not None else NullOperation(),
         )
         self._track(action.id, cancel)
         future = asyncio.ensure_future(
@@ -496,7 +740,12 @@ class ExecutionGateway:
         while self.running() and time.monotonic() < deadline:
             await asyncio.sleep(0.05)
 
-        return not self.running()
+        stopped = not self.running()
+
+        if stopped:
+            self.release_lease()  # a task that is still running keeps its lease
+
+        return stopped
 
     @staticmethod
     def _result(

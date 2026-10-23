@@ -257,6 +257,7 @@ class RunCommandTool(Tool):
         read_only=False,
         timeout_seconds=660,
         redact_output=True,
+        serialize=False,
     )
 
     def __init__(
@@ -319,6 +320,7 @@ class RunCommandTool(Tool):
             sandbox=sandbox,
             network=bool(decision.required_capabilities & {CAP_SHELL_NETWORK}),
             log_dir=context.artifacts.spool_dir,
+            on_start=context.operation.set_process,
         )
         return to_output(
             result,
@@ -379,6 +381,7 @@ class RunTestTool(Tool):
         read_only=False,
         timeout_seconds=660,
         redact_output=True,
+        serialize=False,
     )
 
     def __init__(self, policy: CommandPolicy | None = None) -> None:
@@ -399,6 +402,7 @@ class RunTestTool(Tool):
                 policy=self.policy,
                 capabilities=context.capabilities,
                 log_dir=context.artifacts.spool_dir,
+                on_start=context.operation.set_process,
             )
         except TargetError as exc:
             raise ToolError("INVALID_ARGUMENTS", str(exc)) from exc

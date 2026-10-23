@@ -155,6 +155,16 @@ Verification is a layer *above* the gateway, not a tool: it runs typed checks by
 - **Failure handling.** Storing is best-effort and never changes the outcome: a failure is listed in `data.artifact_errors`, the excerpt remains, raw spool files are deleted regardless. If the store cannot be opened the gateway runs without artifacts (`gateway.store_error`). `artifact_store=False` disables them explicitly.
 - **Consistency** (`gateway.check_evidence(result)` → list of problems): failure without an error category; `shell.run` success vs exit code vs process status; `test.run` success vs status, counts adding up, PASSED/FAILED vs counts; `patch.apply` without patch id/files; per artifact: exists, same workspace and action, hash and size match the reference, and size equals the process's reported byte count when nothing was truncated. Verification (§2.8) reports ERROR instead of PASS if any problem is found.
 
+### 2.10 Concurrency and recovery (`execution/recovery`)
+
+- **One change at a time.** Within a gateway, file and Git tools with `read_only=False` run one at a time per event loop; reads run freely, and programs (`shell.run`, `test.run`; `ToolSpec.serialize=False`) may run next to each other and next to edits, but are still journaled and covered by the lease. Waiting longer than `mutation_wait_seconds` (60 s) returns `TIMEOUT` without running the action.
+- **Write lease.** `ExecutionGateway(lease=None|True|False)`: automatic for workspaces inside `.aseos_worktrees`. The first state-changing action takes `<git common dir>/aseos/leases/<workspace id>.json` (owner id, pid + creation token, host, task id, heartbeat, TTL 120 s) and every later one refreshes it. A live holder yields `WORKSPACE_UNAVAILABLE` with `data.holder`; a provably dead holder is taken over; `shutdown()` or collecting the gateway releases it. `gateway.owner_id` identifies the holder; give each task its own gateway and `task_id`.
+- **Intent journal.** For every state-changing action (`journal=True`, default) an `op-*.json` file is written before the tool runs and removed when it ends; tools add checkpoints through `ToolContext.operation`: `files` (path, kind, before/after sha256 — `patch.apply`, `repo.write`), `commit` (`git.commit`), and the child `process` (pid, creation token, run id) via `run_process(on_start=…)`. `require_journal=True` turns an unwritable journal into `RESOURCE_LIMIT` before anything is changed. `state_dir=` overrides the location.
+- **`gateway.recover(terminate_orphans=False)`** returns `{operations, leases, artifacts, worktrees, needs_attention}`; it is synchronous, idempotent and **never re-runs, rolls back or deletes anything** (it only marks journal entries `interrupted`). `operations`: `running` (this gateway), `running_elsewhere` (live other owner, or another host seen within 1 h), `interrupted` (owner gone) each with an `assessment`, and `cleaned` (finished, only the cleanup was missed). Assessment `outcome`: `not_applied`/`not_committed` (`resumable=true`), `applied`/`committed` (do not re-run), `partial`/`diverged`/`head_moved`/`unknown` (inspect first); `files` per path, `base` = pre-change hashes to pass to a guarded retry of `patch.apply`, `process.state` ∈ `gone`, `orphan_running`, `orphan_terminated`, `orphan_survived`, `alive_unverified`. `execution.recovery.reconcile.acknowledge(log, workspace, op_id)` removes an entry once the host has dealt with it.
+- **Orphans** are terminated only with `terminate_orphans=True` and only when pid **and** creation token match the recorded process.
+- **Git locks.** `run_git` retries a `.lock` conflict three times, then fails `GIT_FAILURE` with `data.lock_conflict`, `lock_path`, `lock_age_seconds`, `stale_candidate`, `retries`. Locks are never removed.
+- **Removal protection.** `WorktreeManager.remove` (and so `git.worktree.remove`) fails `PERMISSION_DENIED` while the worktree has a live lease or a live journaled operation.
+
 Default granted capabilities: `fs.read`, `fs.write`, `git.read`, `test.run`. Not granted by default: `fs.delete`, `fs.read_secrets`, `git.write`, `git.discard`, `worktree.manage`, `worktree.discard`, `shell.run`, `shell.network`.
 
 ### 2.6 Security semantics (details in [SECURITY_MODEL.md](SECURITY_MODEL.md))
@@ -190,7 +200,7 @@ are unaffected.
 | `INVALID_ARGUMENTS` | Payload fails schema; missing file; binary/undecodable file; empty patch target; overwrite without `expected_sha256` |
 | `UNKNOWN_TOOL` | No tool registered for the action type |
 | `PERMISSION_DENIED` | Capability not granted (incl. `fs.delete`); path escapes the workspace; protected path or symlink |
-| `WORKSPACE_UNAVAILABLE` | Reserved (workspace is validated at gateway construction) |
+| `WORKSPACE_UNAVAILABLE` | another live task holds the workspace's write lease (`data.lease_conflict`, `data.holder`), or this task's lease was taken over (`data.lease_lost`) |
 | `RESOURCE_LIMIT` | File too large to read, write content too large |
 | `TIMEOUT` | Gateway or command timeout |
 | `CANCELLED` | Reserved (cancellation not yet implemented) |
@@ -206,7 +216,8 @@ are unaffected.
 
 - The policy decides what may *start*; it cannot constrain what an allowed program then does. Network and filesystem access of
   allowed commands are not blocked until the sandbox (Phase 7). `HOME`/`USERPROFILE` are passed through.
-- A tool that ignores `ToolContext.cancel` cannot be interrupted; the gateway then reports `TIMEOUT` and warns that its worker may still run.
+- A tool that ignores `ToolContext.cancel` cannot be interrupted; the gateway then reports `TIMEOUT` and warns that its worker may still run (its journal entry is already closed).
+- Leases are automatic only for managed worktrees; the runtime does not yet call `recover()`; only `patch.apply`, `repo.write` and `git.commit` write file/commit checkpoints; POSIX orphan cleanup is untested here.
 - POSIX process-group handling and `prlimit` are implemented but have not been exercised on a POSIX machine.
 - Artifacts are per-workspace, unencrypted files; gc is not scheduled; execution records are not yet forwarded into Role 1's event stream.
 - Role 1's `ToolRegistry` names and policy risk labels are not yet aligned with the capability model.

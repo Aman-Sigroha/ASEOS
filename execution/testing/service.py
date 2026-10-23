@@ -123,6 +123,7 @@ def run_test_suite(
     policy: CommandPolicy | None = None,
     capabilities: frozenset[str] | set[str] = frozenset(),
     log_dir: Path | None = None,
+    on_start: Any = None,
 ) -> tuple[RunReport, ProcessResult | None]:
     """Detect, run and normalize. Raises TargetError for unacceptable targets."""
 
@@ -204,6 +205,7 @@ def run_test_suite(
         workspace=ws,
         sandbox=sandbox,
         log_dir=log_dir,
+        on_start=on_start,
     )
     report.finished_at = _now()
     report.duration_ms = process.duration_ms

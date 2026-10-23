@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -36,6 +37,10 @@ class _PatchArgs(BaseModel):
                 raise ValueError(f"base[{path!r}] must be a sha256 hex digest")
 
         return value
+
+
+def _sha(content: bytes | None) -> str | None:
+    return None if content is None else hashlib.sha256(content).hexdigest()
 
 
 class PatchValidateTool(Tool):
@@ -103,6 +108,19 @@ class PatchApplyTool(Tool):
                 reverse=args.reverse,
                 allow_delete=CAP_FS_DELETE in context.capabilities,
                 allow_secrets=CAP_FS_READ_SECRETS in context.capabilities,
+            )
+            context.operation.checkpoint(
+                "files",
+                patch_id=plan.patch_id,
+                files=[
+                    {
+                        "path": f.path,
+                        "kind": f.kind,
+                        "before": _sha(f.before),
+                        "after": _sha(f.after),
+                    }
+                    for f in plan.files
+                ],
             )
             data = apply_plan(plan, action_id=context.action_id)
         except ToolError as error:

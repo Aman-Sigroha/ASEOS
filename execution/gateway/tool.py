@@ -15,6 +15,7 @@ from execution.security.paths import (
 )
 from runtime.schemas.action import ActionType
 from execution.artifacts.sink import NullSink
+from execution.recovery.ops import NullOperation
 from runtime.schemas.execution import ArtifactRef, ErrorCategory
 
 
@@ -37,6 +38,9 @@ class ToolContext:
     # Where this action stores artifacts (an ArtifactSink, or a NullSink
     # when artifacts are disabled). Never raises.
     artifacts: Any = field(default_factory=NullSink)
+    # The journal entry of this action (checkpoints, child process); a
+    # NullOperation for read-only actions or when the journal is off.
+    operation: Any = field(default_factory=NullOperation)
 
 
 @dataclass(frozen=True)
@@ -58,6 +62,10 @@ class ToolSpec:
     # leaves the gateway. Not for file-reading tools, whose content is the
     # workspace itself (altering it would break edits).
     redact_output: bool = False
+    # State-changing tools run one at a time per workspace. Programs (shell,
+    # tests) opt out: they may run next to each other and next to edits, but
+    # are still journaled and covered by the workspace lease.
+    serialize: bool = True
 
 
 @dataclass

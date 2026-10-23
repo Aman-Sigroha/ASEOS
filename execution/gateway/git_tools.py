@@ -275,6 +275,9 @@ class GitCommitTool(Tool):
     )
 
     def run(self, context: ToolContext, args: GitCommitArgs) -> ToolOutput:
+        context.operation.checkpoint(
+            "commit", message=args.message[:200], paths=args.paths[:200]
+        )
         data = _call(
             lambda: commit_paths(context.workspace, args.message, args.paths)
         )

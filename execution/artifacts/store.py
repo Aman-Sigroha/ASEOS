@@ -386,6 +386,43 @@ class ArtifactStore:
                 "nothing more can be stored until they expire.",
             )
 
+    def audit(self, *, deep: bool = False) -> dict[str, Any]:
+        """Report (never repair) inconsistencies: blobs without metadata,
+        metadata without a blob, expired artifacts not yet collected, leftover
+        spool files, and with `deep` content that no longer matches its hash."""
+
+        metas = {p.stem for p in self._meta.glob("art_*.json")}
+        blobs = {p.stem for p in self._objects.glob("art_*.blob")}
+        now = _now()
+        expired = 0
+        corrupt: list[str] = []
+
+        for artifact_id in sorted(metas):
+            try:
+                meta = ArtifactMeta.model_validate_json(self._meta_path(artifact_id).read_bytes())
+            except (OSError, ValueError):
+                corrupt.append(artifact_id)
+                continue
+
+            if datetime.fromisoformat(meta.expires_at) <= now:
+                expired += 1
+            elif deep and artifact_id in blobs:
+                try:
+                    self.verify(artifact_id)
+                except ArtifactError:
+                    corrupt.append(artifact_id)
+
+        return {
+            "artifacts": len(metas),
+            "orphan_blobs": sorted(blobs - metas),
+            "missing_blobs": sorted(metas - blobs),
+            "corrupt": corrupt,
+            "expired_uncollected": expired,
+            "spool_files": sorted(p.name for p in self._spool.iterdir()),
+            "total_bytes": self.total_bytes(),
+            "clean": not (blobs - metas or metas - blobs or corrupt),
+        }
+
     def gc(self, now: float | None = None, reserve: int = 0) -> dict[str, Any]:
         """Remove expired artifacts, orphans and stale spool files; then
         enforce the size quota by dropping the oldest *temporary* artifacts.

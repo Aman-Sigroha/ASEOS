@@ -23,13 +23,14 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from execution.commands.capture import BoundedCapture
 from execution.commands.env import EnvironmentError_, build_environment, redact
+from execution.recovery.liveness import identity_of
 
 DEFAULT_LOG_DIR = Path(tempfile.gettempdir()) / "aseos-command-logs"
 _BATCH_SUFFIXES = (".cmd", ".bat")
@@ -345,6 +346,7 @@ def run_process(
     workspace: Path | None = None,
     sandbox: Any = None,
     network: bool = False,
+    on_start: Callable[[int, int | None, str], None] | None = None,
 ) -> ProcessResult:
     limits = limits or ProcessLimits()
     started = time.perf_counter()
@@ -459,6 +461,13 @@ def run_process(
             return _fail("permission", f"Permission denied: {exc}", request, started)
         except OSError as exc:
             return _fail("start_failed", f"Could not start process: {exc}", request, started)
+
+        if on_start is not None:
+            try:
+                identity = identity_of(proc.pid)
+                on_start(proc.pid, identity.created if identity else None, run_id)
+            except Exception:
+                pass  # recording must never affect the run
 
         if os.name == "nt" and job is not None:
             handle = int(proc._handle)  # type: ignore[attr-defined]

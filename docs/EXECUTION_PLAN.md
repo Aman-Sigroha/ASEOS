@@ -4,7 +4,7 @@ Execution, Git, worktrees, command running, sandboxing and testing.
 
 - **Status snapshot date:** 2026-10-23
 - **Branch audited:** `execution` (HEAD `a91605f`)
-- **Test baseline:** `python -m pytest -q` → 1082 passed, 6 skipped (symlink/POSIX-mode tests and the real-container test skip where unavailable), 0 failed (default `testpaths` now exclude the
+- **Test baseline:** `python -m pytest -q` → 1138 passed, 6 skipped (symlink/POSIX-mode tests and the real-container test skip where unavailable), 0 failed (default `testpaths` now exclude the
   intentionally failing `fixtures/` repo). Before the first slices it was 202 passed + 1 fixture failure.
 - **Progress log:** slices A1–A3, B1–B2, C1–C4 (Phase 2 filesystem) C5–C9 (Phase 3 patches) D1–D3, D9 (Phase 4 Git) D4–D8, D11 (Phase 5 worktrees) E1–E5 (Phase 6 commands) H1–H6 (Phase 7 security) F1–F6 (Phase 8 tests) and F7–F8 (Phase 9 verification) and G1–G3 (Phase 10 artifacts, redaction, records) are done; B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
 
@@ -67,11 +67,11 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 | 8 | Test discovery & execution | 🟡 PARTIAL | Discovery, 7 adapters, JUnit/JSON/console parsing, normalized statuses, targeted runs, version fingerprint + freshness done; only Python adapters run against real tools |
 | 9 | Deterministic verification evidence | 🟡 PARTIAL | 8 check kinds with traceable evidence, stale/unstable detection, next-step hints and a Role 1 `Verifier` adapter done; Role 1 sign-off, artifact refs (Phase 10) and a `verify.run` action pending |
 | 10 | Artifacts, retention & audit | 🟡 PARTIAL | Artifact store, retention/quota, redaction, execution records, evidence consistency checks, `artifact.read`/`list` and store-failure handling done; Role 1 event forwarding, gc scheduler and report/trace artifacts pending |
-| 11 | Concurrency, interruption & recovery | ⬜ PENDING | — |
+| 11 | Concurrency, interruption & recovery | 🟡 PARTIAL | Serialized mutations, write leases, intent journal, crash reconciliation (never re-runs), orphan-process cleanup with identity checks, git-lock handling and removal protection done and tested with real process deaths; automatic resume and Role 1 hook-up pending |
 | 12 | Cross-role integration | 🟡 PARTIAL | Role 1 wired in; Role 2 and Role 3 pending |
 | 13 | Security, testing & performance qualification | 🟡 PARTIAL | Unit/integration tests only |
 
-**Role 4 completion checklist: 12 ✅ done · 13 🟡 partial · 1 ⬜ pending (of 26)** (an item flips only when its full acceptance criterion is met). See [Section 4](#4-role-4-completion-checklist).
+**Role 4 completion checklist: 12 ✅ done · 14 🟡 partial · 0 ⬜ pending (of 26)** (an item flips only when its full acceptance criterion is met). See [Section 4](#4-role-4-completion-checklist).
 
 ---
 
@@ -108,7 +108,7 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 - 🟡 Namespaced tool ids exist in the gateway; aligning Role 1's `ToolRegistry` pending.
 - ✅ Parameter validation per tool via pydantic schemas (`INVALID_ARGUMENTS`).
 - ✅ Capability enforcement at the execution boundary (`fs.read`, `fs.write`, `git.read`, `test.run` granted by default; `shell.run` withheld → `RUN_COMMAND` denied).
-- ✅ Standard error taxonomy (`ErrorCategory`, 12 values). `WORKSPACE_UNAVAILABLE`, `RESOURCE_LIMIT`, `CANCELLED` are defined but not yet produced.
+- ✅ Standard error taxonomy (`ErrorCategory`, 12 values). `RESOURCE_LIMIT` and `CANCELLED` are produced (size limits, journal refusal, cancellation); `WORKSPACE_UNAVAILABLE` is produced when another live task holds the workspace lease.
 - 🟡 Per-tool gateway timeout done (cannot interrupt the worker thread). Cancellation interface pending.
 - ⬜ Emit execution events from the dispatcher (only `execution/executor.py::execute_task` emits events today).
 - ✅ Dispatcher tests (`execution/tests/test_gateway.py`, 19 tests).
@@ -179,7 +179,7 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 - ✅ Restart reconciliation (`reconcile`): compares records, `git worktree list` and the disk; recovers interrupted create/remove; marks vanished directories `missing`; **reports** orphan directories, unrecorded Git worktrees, detached directories and corrupt records. It changes record statuses only and deletes nothing. Stale Git entries are dropped only by an explicit `prune_missing`, which keeps the branch.
 - ✅ Gateway tools (all need `worktree.manage`, not granted by default; `git.worktree.list` needs `git.read`): `git.worktree.create`, `.list`, `.remove`, `.reconcile`. `discard_unreviewed` on remove works only if the *trusted caller* granted `worktree.discard` — the model cannot authorize its own discard. The tools refuse to run from inside a worktree.
 - ✅ Tests: `test_worktree_manager.py` (53), `test_worktree_tools_and_executor.py` (19), plus the legacy `test_worktrees.py`.
-- 🟡 Not covered: automatic cleanup policies/retention (nothing is ever deleted unless a trusted caller asks); `git worktree lock` is only *respected*, not set by us; no lease/heartbeat to detect a *live* owner process (two callers that both know a worktree id can still use it concurrently — the gateway does not stop that); a worktree on a removed drive looks `missing`; the stale-lock timeout is time-based because process liveness cannot be checked portably; submodules inside worktrees are not handled.
+- 🟡 Not covered: automatic cleanup policies/retention (nothing is ever deleted unless a trusted caller asks); `git worktree lock` is only *respected*, not set by us; live owners are now detected by the Phase 11 write lease (automatic for managed worktrees) and `remove` refuses while a task is running in the worktree; a worktree on a removed drive looks `missing`; the stale-lock timeout is time-based because process liveness cannot be checked portably; submodules inside worktrees are not handled.
 
 ### Phase 6 — Controlled command execution 🟡 PARTIAL
 
@@ -258,19 +258,20 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 - ✅ Artifact-store failure handling: a missing, unwritable, full or corrupt store never fails or changes an action. The excerpt stays in the result, `data.artifact_errors` says what could not be stored (including a failed audit record), raw spool files are still deleted, and the gateway runs with artifacts disabled when the store cannot be opened (`store_error`).
 - ⬜ Left for later: raw JUnit/other report files and build reports as artifacts, execution traces/timelines, a gc scheduler, per-task retention overrides, encryption at rest, cross-process locking of the quota, and tying artifact access to a user/session rather than a workspace.
 
-### Phase 11 — Concurrency, interruption and crash recovery ⬜ PENDING
+### Phase 11 — Concurrency, interruption and crash recovery 🟡 PARTIAL
 
 *Completion criterion: an interrupted execution can be reconciled, resumed when safe or stopped with state preserved, without duplicating mutations or deleting valuable work.*
 
-- ⬜ Prevent conflicting writes to the same managed worktree.
-- ⬜ Task/process/execution-id association and a record of running operations.
-- ⬜ Safe cancellation and process cleanup.
-- ⬜ Checkpoints and post-restart reconciliation (inspect actual FS/process state before resuming; never blindly re-run a mutation).
-- ⬜ Detect missing worktrees and orphaned artifacts.
-- ⬜ Git lock failure / concurrent Git handling.
-- ⬜ Behaviour when a result cannot be persisted.
-- ⬜ Block auto-cleanup when unreviewed changes may be lost.
-- ⬜ Failure-injection tests for interrupted operations.
+- ✅ Conflicting writes are prevented. Inside one gateway, state-changing file and Git actions on a workspace run **one at a time** (reads and programs such as `shell.run`/`test.run` are not blocked; a waiter gives up with `TIMEOUT` after `mutation_wait_seconds`, default 60 s, without running). Across gateways and processes an **exclusive write lease** (`execution/recovery/lease.py`) is taken for managed worktrees automatically (`.aseos_worktrees/…`) and for any workspace with `lease=True`: a second live owner gets `WORKSPACE_UNAVAILABLE` naming the holder (owner, pid, task, heartbeat age). A lease whose owner is provably gone (same host: the recorded process no longer exists or the pid was reused — checked with a creation token; other host: heartbeat older than the TTL) is taken over atomically, so exactly one contender wins; a live lease is never broken. A lease left behind by a forgotten gateway object is released when the object is collected, and `shutdown()` releases it.
+- ✅ Task/process/execution-id association and a record of running operations: before any state-changing action runs, its **intent is journaled** (`execution/recovery/ops.py`, `<git common dir>/aseos/ops/<workspace>/op-*.json`): runtime `action_id`, tool, owner gateway + pid + creation token, task id, Git HEAD, an args digest/summary (no environment values, no patch/content text), checkpoints, and the child process (pid, creation token, `run_id`) once a command starts. The file is removed when the action ends; the durable history stays the Phase 10 execution record. `require_journal=True` refuses to change the workspace when the intent cannot be written; otherwise the action proceeds and `data.artifact_errors` says the journal failed.
+- ✅ Safe cancellation and process cleanup: cancellation/timeout/shutdown (earlier phases) now also close the journal entry; after a crash `recover(terminate_orphans=True)` stops a leftover child process **only if its identity (pid + creation token) matches the recorded one** — a recycled pid is never touched, an unverifiable one is reported and left alone. On Windows the job object already kills the child when its owner dies; on POSIX it survives and is found this way.
+- ✅ Checkpoints and post-restart reconciliation (`ExecutionGateway.recover()`, `execution/recovery/reconcile.py`): every journaled operation whose owner is gone is **inspected against the real files, HEAD and processes, never re-run**. Verdicts: `not_applied` (safe to retry), `applied` (do not re-run), `partial`, `diverged` (inspect first), `committed` / `not_committed` / `head_moved`, `unknown` (a command: effects cannot be known; HEAD movement is reported). `patch.apply` and `repo.write` checkpoint each file's before/after hash, `git.commit` its intended message. The report returns the pre-change hashes as `base` for a guarded retry — a small diff can match a file that is already changed and apply **twice**, so a retry without `base` is unsafe (found while writing the crash tests). Interrupted operations stay in the table until the host calls `acknowledge()`; an action that actually finished but missed its cleanup (its execution record exists) is cleaned, not reported. Operations from another machine are judged by age (1 h).
+- ✅ Missing worktrees and orphaned artifacts are detected: `recover()` runs `WorktreeManager.reconcile()` (missing/unrecorded worktrees, report only), `ArtifactStore.audit()` (orphan blobs, metadata without blob, hash mismatches with `deep`, leftover spool files) and lists stale leases. One failing section does not hide the others.
+- ✅ Git lock failures: a lock conflict is retried (0.2/0.5/1 s) and then reported with `lock_conflict`, `lock_path`, `lock_age_seconds` and `stale_candidate` (older than 10 min). **A lock is never removed automatically.**
+- ✅ Behaviour when a result cannot be persisted: an unwritable artifact store/record never changes the outcome (Phase 10) and a missing journal entry cleanup is reconciled through the execution record.
+- ✅ Auto-cleanup is blocked when work may be lost: `WorktreeManager.remove` refuses while a live task holds the worktree's lease or a live operation is journaled in it, in addition to the existing refusal on unreviewed changes (backed up only after explicit confirmation).
+- ✅ Failure-injection tests with real processes that die at an exact point (`os._exit`, `kill`): before any write, halfway through a two-file patch, after the patch landed, during a file write, around a commit (before and after), a killed gateway with a running child, a file edited after the crash, plus lease takeover, contention, recycled pids, journal write failures, git locks and removal protection (`test_concurrency_and_crash.py`, `test_recovery_primitives.py`).
+- 🟡 Not covered: **automatic resume** (the report says what is safe; deciding and re-planning is Role 1's); the runtime does not call `recover()` or `acknowledge()` yet; only `patch.apply`, `repo.write` and `git.commit` record file/commit checkpoints (other state-changing tools — `patch.replace`, `git.stage`, `git.branch_create`, `git.discard` — report `unknown`; worktree create/remove recover through the worktree registry); leases are automatic only for managed worktrees, so two gateways on an ordinary workspace can still collide unless `lease=True`; an idle live owner keeps its lease until `shutdown()`/collection; heartbeats on another host only refresh when the owner acts; if a tool ignores cancellation and its worker thread keeps running after a gateway timeout, its journal entry is already gone; POSIX orphan handling and the Linux creation token are written but were **not run on a POSIX machine**; macOS has no creation token, so orphans there are reported but never killed.
 
 ### Phase 12 — Integration with the other roles 🟡 PARTIAL
 
@@ -355,7 +356,7 @@ sandbox → tests → verification → recovery/artifacts → integration/securi
 - ✅ D4. Worktree metadata registry. ✅ D5. Dirty-check before removal; `execute_task` no longer auto-destroys work. ✅ D6. Managed-area-only cleanup. ✅ D7. Locking. ✅ D8. Restart reconciliation.
 - ⬜ D12. Register the `WORKTREE_*` action types in Role 1's `ToolRegistry`/policy and decide who grants `worktree.manage` / `worktree.discard` (runtime or UI after user approval).
 - ⬜ D13. Tell Role 3 about worktree create/remove and give each worktree its own index key (needs the Role 3 interface).
-- ⬜ D14. Lease/heartbeat so a second live owner of the same worktree can be detected.
+- ✅ D14. Lease/heartbeat so a second live owner of the same worktree can be detected (Phase 11).
 - ✅ D9. Mutating git ops (branch → stage selected → commit → scoped discard), each behind its own capability.
 - ⬜ D10. Register `GIT_STATUS`, `GIT_INFO`, `GIT_STAGE`, `GIT_COMMIT`, `GIT_BRANCH`, `GIT_DISCARD` in Role 1's `ToolRegistry` and risk policy (the mutating ones should require approval).
 - ✅ D11. `execute_task` uses the structured diff (`mode=base`, untracked included).
@@ -376,10 +377,11 @@ sandbox → tests → verification → recovery/artifacts → integration/securi
 - ✅ F1. Detect pytest/unittest from config (project interpreter/venv still ⬜). ✅ F2. JUnit XML parse → `RunReport` (+ `to_runtime_result`). ✅ F3. Targeted runs. ✅ F4. npm/Maven/Gradle/Cargo/Go adapters (unverified against real tools).
 - ⬜ F4b. Run the non-Python adapters against real projects and fix what breaks. ⬜ F4c. Use the project's own interpreter/venv.
 - ✅ F5. Record workspace revision on each test run; ✅ F6. staleness check (`test.freshness`); ✅ F7. check kinds (tests/build/lint/typecheck/file exists/file content/diff contains/prohibited paths); ✅ F8. `ExecutionVerifier` hands the evidence to Role 1 as a `VerificationResult`.
+- ⬜ G4b. Call `gateway.recover()` / `acknowledge()` from Role 1's runtime at task start and decide resume vs replan from the verdicts; extend checkpoints to `patch.replace`, `git.stage`, `git.branch_create`, `git.discard`; verify the POSIX orphan path on Linux/macOS (CI).
 - ⬜ F9. Replace `CommandVerifier` with `ExecutionVerifier` in the real composition (needs Role 1) — same as E9. ⬜ F10. `verify.run` gateway action + check specs in Role 1's task/plan schema. ⬜ F11. Include git-ignored files in the prohibited-path check.
 
 **Slice group G — Artifacts, recovery, integration**
-- ✅ G1. Artifact store + bounded results (+ `artifact.read`/`artifact.list`). ✅ G2. Redaction. 🟡 G3. Execution records (done; running-ops table waits for Phase 11). G4. Reconcile on restart. G5. Failure-injection suite.
+- ✅ G1. Artifact store + bounded results (+ `artifact.read`/`artifact.list`). ✅ G2. Redaction. ✅ G3. Execution records and the running-operations table (Phase 11). ✅ G4. Reconcile on restart (`gateway.recover()`). G5. Failure-injection suite.
 - ⬜ G1b. Forward execution records into Role 1's `EventEmitter` (needs Role 1). ⬜ G1c. Schedule `store.gc()`; retain raw JUnit/build reports and traces; register `READ_ARTIFACT`/`LIST_ARTIFACTS` in Role 1's `ToolRegistry`.
 - G6. Role 1 end-to-end through the gateway. G7. Role 2 API surface. G8. Role 3 change notifications + index-refresh test. G9. Security + performance suites.
 
@@ -421,7 +423,7 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 **F. Artifacts and recovery**
 - [x] Add bounded output and artifact references — bounded excerpts + retrievable artifacts with hashes, ownership and retention
 - [~] Implement redaction and execution audit records — pattern + environment redaction and per-action audit records done; records are not yet forwarded into Role 1's event stream, redaction is best-effort
-- [ ] Handle interruption, concurrency and crash recovery
+- [~] Handle interruption, concurrency and crash recovery — serialization, leases, journal, reconciliation and orphan cleanup done and failure-injection tested on Windows; automatic resume, Role 1 hook-up and POSIX verification pending
 
 **G. Integration and quality**
 - [~] Connect real tools to the Role 1 runtime — `RealActionExecutor` wired; no gateway
@@ -429,7 +431,7 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 - [ ] Coordinate index refreshes and worktrees with Role 3
 - [~] Complete security, failure-injection and performance tests — unit/integration only
 
-`[x]` done · `[~]` partial · `[ ]` pending — **12 / 13 / 1** of 26.
+`[x]` done · `[~]` partial · `[ ]` pending — **12 / 14 / 0** of 26.
 
 ---
 

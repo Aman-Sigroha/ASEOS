@@ -12,7 +12,9 @@ Every call goes through `run_git`:
 """
 
 import os
+import re
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,11 @@ from typing import Any
 from execution.security.paths import raw_path_problem
 
 GIT_TIMEOUT_SECONDS = 20
+# Another Git process (or an editor's Git integration) may hold index.lock
+# for a moment. Retry a few times; never remove a lock ourselves.
+LOCK_RETRY_DELAYS = (0.2, 0.5, 1.0)
+LOCK_STALE_AGE_SECONDS = 600.0
+_LOCK_PATH = re.compile(r"Unable to create '([^']+\.lock)'")
 _REDIRECTING_ENV = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -77,13 +84,23 @@ def run_git(
     command += ["-c", "core.fsmonitor=false"] + args
 
     try:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            timeout=timeout,
-            env=_environment(),
-            stdin=subprocess.DEVNULL,
-        )
+        for attempt in range(len(LOCK_RETRY_DELAYS) + 1):
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                timeout=timeout,
+                env=_environment(),
+                stdin=subprocess.DEVNULL,
+            )
+
+            if (
+                completed.returncode in ok_codes
+                or b".lock" not in completed.stderr
+                or attempt == len(LOCK_RETRY_DELAYS)
+            ):
+                break
+
+            time.sleep(LOCK_RETRY_DELAYS[attempt])
     except FileNotFoundError as exc:
         raise GitError("PROCESS_FAILURE", "git executable not found") from exc
     except subprocess.TimeoutExpired as exc:
@@ -106,7 +123,21 @@ def run_git(
 
         if "index.lock" in result.stderr or ".lock" in result.stderr:
             data["lock_conflict"] = True
-            message += " (another Git process may be running; retry later)"
+            data["retries"] = len(LOCK_RETRY_DELAYS)
+            found = _LOCK_PATH.search(result.stderr)
+
+            if found:
+                data["lock_path"] = found.group(1)
+
+                try:
+                    age = time.time() - os.stat(found.group(1)).st_mtime
+                    data["lock_age_seconds"] = round(age, 1)
+                    # Only a hint: the lock is never removed automatically.
+                    data["stale_candidate"] = age > LOCK_STALE_AGE_SECONDS
+                except OSError:
+                    data["lock_released"] = True
+
+            message += " (another Git process holds a lock; it was retried and never removed)"
 
         raise GitError("GIT_FAILURE", message, data)
 

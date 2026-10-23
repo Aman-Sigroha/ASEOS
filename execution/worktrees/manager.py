@@ -452,6 +452,39 @@ class WorktreeManager:
 
         return {"files": backups, "complete": complete, "notes": notes}
 
+    def _refuse_if_in_use(self, record: WorktreeRecord) -> None:
+        """A running task owns its worktree: never remove it from under it."""
+
+        from execution.recovery.lease import live_holder
+        from execution.recovery.locations import this_host
+        from execution.recovery.liveness import is_same_process
+        from execution.recovery.ops import OperationsLog
+
+        state = self.common_dir / "aseos"
+        holder = live_holder(state, record.path)
+
+        if holder:
+            raise GitError(
+                "PERMISSION_DENIED",
+                "A running task holds this worktree; stop it before removing the worktree.",
+                {
+                    "worktree_id": record.worktree_id,
+                    "holder": {k: holder.get(k) for k in ("owner_id", "pid", "task_id")},
+                },
+            )
+
+        for op in OperationsLog(state).list(record.path):
+            alive = (
+                is_same_process(op.pid, op.pid_created) if op.host == this_host() else True
+            )
+
+            if alive:
+                raise GitError(
+                    "PERMISSION_DENIED",
+                    f"{op.tool} is still running in this worktree; wait for it or cancel it first.",
+                    {"worktree_id": record.worktree_id, "action_id": op.action_id},
+                )
+
     def remove(
         self, worktree_id: str, *, discard_confirmed: bool = False
     ) -> dict[str, Any]:
@@ -464,6 +497,7 @@ class WorktreeManager:
                 return {"worktree_id": worktree_id, "removed": True, "already": True}
 
             self._check_recorded_path(record)
+            self._refuse_if_in_use(record)
             assessment = self.assess(record)
 
             if assessment["exists"] and not assessment["registered_in_git"]:

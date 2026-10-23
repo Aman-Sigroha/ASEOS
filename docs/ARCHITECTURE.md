@@ -84,6 +84,8 @@ ASEOS/
 │   │                         policy.py (default-deny command policy), runner.py (trusted-caller wrapper)
 │   ├── testing/              service.py (detect → run → normalize), adapters.py (pytest, unittest, npm, Maven,
 │   │                         Gradle, Cargo, Go), junit.py, console.py, model.py (RunReport); runner.py = legacy helper
+│   ├── recovery/             lease.py (write lease), ops.py (intent journal), reconcile.py (post-crash assessment),
+│   │                         liveness.py (process identity), locations.py
 │   ├── artifacts/            store.py (content store, retention, quota, gc), redact.py, sink.py (per-action handle),
 │   │                         records.py (audit records), consistency.py (evidence checks)
 │   ├── versioning.py         workspace_version(): content fingerprint used to date test results
@@ -206,7 +208,7 @@ What is **not** provided (do not assume it):
 
 - A *proven* sandbox. Worktrees isolate source, not processes. A container backend exists and is enforced fail-closed by the `dev`/`elevated` profiles, but it has only been tested against a stand-in engine, not a real daemon (see [SECURITY_MODEL.md](SECURITY_MODEL.md) §6).
 - Anything beyond *starting* only allowed programs: what a test suite or build script then does (network, files outside the workspace, user-level config via `HOME`) is not restricted; POSIX process handling is untested here; no memory/process limits off Windows.
-- Patch recovery, crash recovery, file locking, and notification of other subsystems after writes (`repo.write` does detect stale-version conflicts).
+- Automatic resume of interrupted work, cross-process exclusion on ordinary (non-managed) workspaces, and notification of other subsystems after writes. What does exist: serialized changes, write leases for managed worktrees, an intent journal and `gateway.recover()`, which classifies interrupted operations against the real files without re-running them.
 - Encrypted or access-controlled artifacts, scheduled retention cleanup, or forwarding of execution records into the runtime's event stream (the records and the `add_observer` hook exist; the wiring is Role 1's).
 - `CommandVerifier` (Role 1) runs shell command strings directly and does not go through the execution boundary.
 
@@ -276,7 +278,7 @@ artifacts, command policy and sandboxing — will be added in slices so the runt
   `tests/agent/test_real_executor_integration.py`.
 - Role 1 suites: `tests/agent`, `decision`, `events`, `llm`, `planner`, `schemas`, `state`, `task`, `tools`,
   `verification`.
-- Baseline at time of writing: **1082 passed, 6 skipped** (symlink-file and POSIX-mode tests skip when the OS does not allow
+- Baseline at time of writing: **1138 passed, 6 skipped** (symlink-file and POSIX-mode tests skip when the OS does not allow
   them; a Windows directory-junction test covers the same escape). `pyproject.toml` `testpaths` limits default collection to `tests/`
   and `execution/tests/`; the deliberately broken `fixtures/repositories/calculator` test (which the demo fixes)
   is not collected.
