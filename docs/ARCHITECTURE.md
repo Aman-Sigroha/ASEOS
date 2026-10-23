@@ -72,7 +72,8 @@ ASEOS/
 │   ├── executor.py           execute_task(): worktree → patch → tests → diff → cleanup (+ events)
 │   ├── gateway/              ExecutionGateway (dispatcher), Tool/ToolSpec protocol, capabilities,
 │   │                         fs_tools.py (read/list/info/search/replace/write), patch_tools.py (patch.validate/apply),
-│   │                         tools.py (test, git diff, shell.run, default_tools)
+│   │                         git_tools.py (git.status/diff/info/stage/commit/branch_create/discard),
+│   │                         tools.py (test.run, shell.run, default_tools)
 │   ├── patches/              unified.py (diff parser), engine.py (plan/validate/apply/rollback/report),
 │   │                         fileio.py (atomic write), apply.py (legacy exact-text replace used by execute_task)
 │   ├── git/                  operations.py (status, diff), worktree.py (create/remove);
@@ -97,7 +98,8 @@ ASEOS/
 - **Schemas** (`runtime/schemas/`): `Action` (`id`, `type`, `payload`), `ExecutionResult`, `Plan`, `Task`,
   `RepositoryContext`, `TestRunResult`, `TaskResult`.
 - **Action types:** `SEARCH`, `READ`, `EDIT`, `RUN_TEST`, `RUN_COMMAND`, `GIT_DIFF`, plus `LIST_DIR`, `FILE_INFO`, `WRITE`,
-  `VALIDATE_PATCH`, `APPLY_PATCH` (the latter five are implemented by the gateway but not yet in `ToolRegistry.default()`).
+  `VALIDATE_PATCH`, `APPLY_PATCH`, `GIT_STATUS`, `GIT_INFO`, `GIT_STAGE`, `GIT_COMMIT`, `GIT_BRANCH`, `GIT_DISCARD`
+  (all implemented by the gateway but not yet in `ToolRegistry.default()`).
 - **Planning:** `Planner` produces a `Plan` of steps; `ActionGenerator` maps each step to an `Action`.
 - **Decisions:** a `DecisionEngine` (deterministic or LLM-backed, routed by `runtime/llm/router.py`) proposes the
   next `Decision`; `DecisionValidator` checks it structurally; `DecisionPolicy` returns `ALLOW` or
@@ -256,7 +258,7 @@ artifacts, command policy and sandboxing — will be added in slices so the runt
   `tests/agent/test_real_executor_integration.py`.
 - Role 1 suites: `tests/agent`, `decision`, `events`, `llm`, `planner`, `schemas`, `state`, `task`, `tools`,
   `verification`.
-- Baseline at time of writing: **330 passed, 5 skipped** (symlink-file and POSIX-mode tests skip when the OS does not allow
+- Baseline at time of writing: **411 passed, 5 skipped** (symlink-file and POSIX-mode tests skip when the OS does not allow
   them; a Windows directory-junction test covers the same escape). `pyproject.toml` `testpaths` limits default collection to `tests/`
   and `execution/tests/`; the deliberately broken `fixtures/repositories/calculator` test (which the demo fixes)
   is not collected.

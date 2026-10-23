@@ -4,9 +4,9 @@ Execution, Git, worktrees, command running, sandboxing and testing.
 
 - **Status snapshot date:** 2026-10-23
 - **Branch audited:** `execution` (HEAD `a91605f`)
-- **Test baseline:** `python -m pytest -q` → 330 passed, 5 skipped (symlink/POSIX-mode tests skip where unavailable), 0 failed (default `testpaths` now exclude the
+- **Test baseline:** `python -m pytest -q` → 411 passed, 5 skipped (symlink/POSIX-mode tests skip where unavailable), 0 failed (default `testpaths` now exclude the
   intentionally failing `fixtures/` repo). Before the first slices it was 202 passed + 1 fixture failure.
-- **Progress log:** slices A1–A3, B1–B2, C1–C4 (Phase 2 filesystem) and C5–C9 (Phase 3 patches) are done; B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
+- **Progress log:** slices A1–A3, B1–B2, C1–C4 (Phase 2 filesystem) C5–C9 (Phase 3 patches) and D1–D3, D9 (Phase 4 Git) are done; B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
 
 Companion documents: [ARCHITECTURE.md](ARCHITECTURE.md) (how the system fits together),
 [API_CONTRACTS.md](API_CONTRACTS.md) (baseline runtime ↔ execution contract),
@@ -59,7 +59,7 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 | 1 | Execution gateway & tool adapters | 🟡 PARTIAL | `ExecutionGateway` + 6 typed tools, capabilities, error taxonomy done; events, cancellation, registry alignment pending |
 | 2 | Safe filesystem tools | 🟡 PARTIAL | Bounded reads, line ranges, list/info, hash-checked atomic writes, symlink policy done; change notifications (Role 3) pending |
 | 3 | Patch validation & application | 🟡 PARTIAL | Unified-diff validate/apply (create/modify/delete, multi-file, base hashes, rollback, reverse) done; persisted recovery artifacts + task-level provenance pending |
-| 4 | Git status, diff & operations | 🟡 PARTIAL | Basic status + unstaged diff; no staged/base/stats/mutations |
+| 4 | Git status, diff & operations | 🟡 PARTIAL | Structured status/diff/info and scoped stage/commit/branch/discard done; worktree-lifecycle protection of user work (Phase 5) pending |
 | 5 | Worktrees & task isolation | 🟡 PARTIAL | Create/remove works; no metadata, locking, recovery, safe cleanup |
 | 6 | Controlled command execution | 🟡 PARTIAL | `run_command` with list args + timeout; no env policy, caps, tree-kill, cancel |
 | 7 | Sandboxing & execution security | ⬜ PENDING | Only worktree isolation + `RUN_COMMAND` disabled |
@@ -70,7 +70,7 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 | 12 | Cross-role integration | 🟡 PARTIAL | Role 1 wired in; Role 2 and Role 3 pending |
 | 13 | Security, testing & performance qualification | 🟡 PARTIAL | Unit/integration tests only |
 
-**Role 4 completion checklist: 3 ✅ done · 12 🟡 partial · 11 ⬜ pending (of 26)** (an item flips only when its full acceptance criterion is met). See [Section 4](#4-role-4-completion-checklist).
+**Role 4 completion checklist: 4 ✅ done · 12 🟡 partial · 10 ⬜ pending (of 26)** (an item flips only when its full acceptance criterion is met). See [Section 4](#4-role-4-completion-checklist).
 
 ---
 
@@ -150,16 +150,16 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 
 *Completion criterion: the agent can inspect real repository changes and perform only authorized Git operations against the intended repo or worktree.*
 
-- ✅ `git_status` → branch, clean flag, modified files; `git_diff` → unstaged diff (`execution/git/operations.py`). Tests in `test_git_operations.py`.
-- ✅ `GIT_DIFF` action wired through `RealActionExecutor`.
-- 🟡 `execution/git/status.py` and `execution/git/diff.py` are empty placeholders; real logic lives in `operations.py`. Consolidate.
-- ⬜ Repository root/identity, staged vs unstaged separation, untracked files, rename/add/delete status, merge/rebase state.
-- ⬜ Explicit diff base (worktree vs base commit), diff statistics, changed-file list, bounded diff output + artifact.
-- 🟡 `GIT_DIFF` via the gateway maps failures to `GIT_FAILURE`; the `git_status`/`git_diff` helpers still raise `CalledProcessError` (`check=True`). Git output is now decoded as UTF-8 (was the locale codepage, which crashed on non-cp1252 characters).
-- ⬜ Read-only extras: commit metadata, branch list, default branch.
-- ⬜ Mutating ops (agent branch, selective staging, commit, scoped discard) with path/scope validation.
-- ⬜ Preserve pre-existing user changes: check dirty state, refuse unsafe ops, record before/after evidence.
-- ⬜ Tests with dirty trees and pre-existing user changes.
+- ✅ Consolidated: `execution/git/repo.py` (hardened runner), `status.py`, `diff.py`, `info.py`, `mutate.py`. `operations.py` is now a thin wrapper kept for `execute_task` and the demo.
+- ✅ `git.status` (`GIT_STATUS`): branch, upstream, ahead/behind, detached flag, staged / unstaged / untracked / conflicted paths, per-entry add/modify/delete/rename status, in-progress merge/rebase/cherry-pick/revert/bisect state; unborn repos work.
+- ✅ `git.diff` (`GIT_DIFF`) with an explicit base: `unstaged` (working tree vs index), `staged` (index vs HEAD), `base` (working tree vs a commit/branch, resolved to a full hash). Per-file status, rename similarity, additions/deletions, binary flag, changed-file list, path filter, `max_bytes` bound with `truncated`/`total_bytes`. Untracked files appear as added files (≤50 files, ≤200 KB each; skipped ones are listed).
+- ✅ `git.info` (`GIT_INFO`): repository root, git dir, linked-worktree flag, HEAD, current/default branch, branch list, recent commits, and the config relevant to committing (user set?, gpgsign).
+- ✅ Failures are categorized (`GIT_FAILURE`, `TIMEOUT`, `PROCESS_FAILURE`, `INVALID_ARGUMENTS`), including `data.lock_conflict` for index-lock clashes.
+- ✅ Hardening: argv only, `--literal-pathspecs` (no globs), `core.fsmonitor` disabled (a repo can use it to run programs), `--no-ext-diff`/`--no-textconv`, `GIT_DIR`-style environment redirection removed, prompts disabled, refs checked with `--end-of-options`, `--no-optional-locks` for reads. The workspace must *be* the repository/worktree root, so a nested workspace can never read or change an outer repository.
+- ✅ Mutating tools, each needing a capability that is **not granted by default**: `git.stage`, `git.commit`, `git.branch_create` (`git.write`) and `git.discard` (`git.discard`). See EXECUTION_CONTRACT §2.3 for the exact rules.
+- ✅ Preserving user work: named files only (no `.`/dirs/globs, `.env` and `.git` refused); `commit` refuses unless the index holds *exactly* the named paths; refuses detached HEAD and merge/rebase/conflict states; `branch_create` never checks out or moves a branch; `discard` only touches tracked, unstaged files and returns the discarded diff (re-applicable via `patch.apply`); every mutation reports `other_changes` (dirty paths outside its scope, observed before it ran) and the status counts after.
+- ✅ Tests with dirty trees and pre-existing user changes: `test_git_read_tools.py`, `test_git_mutations.py` (81 tests, real repos incl. linked worktree, merge conflict, upstream, lock file, fsmonitor).
+- 🟡 Not covered: pushing/fetching, checkout/switch, reset, stash, rebase (deliberately out of scope); staging cannot tell the agent's edits from the user's earlier edits *inside the same file* (use an isolated worktree, or pass `expected_sha256`); hooks and signing configured in the repo still run on `git.commit`; diff text is bounded after Git produces it, not while streaming; the 'artifact' for oversized diffs waits for Phase 10.
 
 ### Phase 5 — Git worktrees and task isolation 🟡 PARTIAL
 
@@ -308,7 +308,7 @@ Fix these as early slices; they are small and risk-reducing.
 | 5 | `CommandVerifier` uses `create_subprocess_shell` with string commands | `runtime/verification/command.py` | Shell injection surface; bypasses execution boundary (Role 1 owns, needs coordination) |
 | 6 | `apply_patch` (legacy replace used by `execute_task` and `patch.replace`) uses default text encoding / newline handling; the new unified-diff engine does not have this problem | `execution/patches/apply.py` | Can corrupt CRLF files or non-UTF-8 platform defaults on Windows |
 | 7 | ~~`READ` has no size limit~~ **Fixed (slice C1)**; `SEARCH` still skips undecodable files silently and does not report skipped counts | `execution/gateway/fs_tools.py` | Silent partial search results |
-| 8 | `git_diff`/`git_status` use `check=True` and raise (gateway path categorizes; the helpers do not) | `execution/git/operations.py` | Non-repo or git failure surfaces as exceptions, not a categorized result |
+| 8 | ~~`git_diff`/`git_status` raised raw `CalledProcessError`~~ **Fixed (slice D1)**: they now raise categorized `GitError`; gateway tools return categorized results | `execution/git/` | — |
 | 9 | Empty placeholder modules: `execution/git/status.py`, `execution/git/diff.py`, `execution/tests/runner.py`, `execution/worktrees/__init__.py`, `execution/patches/__init__.py` | `execution/` | Two layouts (`git/`, `worktrees/`, `testing/`, `tests/`) cause confusion; pick one |
 | 10 | ~~Root `pytest` collected the intentionally failing calculator fixture~~ **Fixed (slice A2)**: `testpaths = ["tests", "execution/tests"]` | `pyproject.toml` | Default suite is green |
 | 11 | `fixtures/repositories/calculator` is tracked as an embedded Git repository (gitlink `160000`, no `.gitmodules`), not plain files | repo root | Fixture contents are not part of this repo's history and a fresh clone gets an empty directory; vendor the files or use a proper submodule |
@@ -342,9 +342,11 @@ sandbox → tests → verification → recovery/artifacts → integration/securi
 - ⬜ C11. Register `VALIDATE_PATCH` / `APPLY_PATCH` (and the Phase 2 types) in Role 1's `ToolRegistry`.
 
 **Slice group D — Git & worktrees**
-- D1. Consolidate git status/diff modules; error mapping. D2. Staged/untracked/rename/stat/base-explicit diff. D3. Repo identity.
+- ✅ D1. Consolidate git status/diff modules; error mapping. ✅ D2. Staged/untracked/rename/stat/base-explicit diff. ✅ D3. Repo identity.
 - D4. Worktree metadata registry. D5. Dirty-check before removal; stop auto-removing in `execute_task`. D6. Managed-area-only cleanup. D7. Locking. D8. Restart reconciliation.
-- D9. Mutating git ops (branch → stage selected → commit → scoped discard), each separately.
+- ✅ D9. Mutating git ops (branch → stage selected → commit → scoped discard), each behind its own capability.
+- ⬜ D10. Register `GIT_STATUS`, `GIT_INFO`, `GIT_STAGE`, `GIT_COMMIT`, `GIT_BRANCH`, `GIT_DISCARD` in Role 1's `ToolRegistry` and risk policy (the mutating ones should require approval).
+- ⬜ D11. Make `execute_task` use the structured diff (`mode=base`, untracked included) so new files show up in its reported diff.
 
 **Slice group E — Commands & sandbox**
 - E1. cwd enforcement + env policy. E2. Output caps + truncation metadata. E3. Process-tree kill + orphan test (Windows and POSIX). E4. Cancellation. E5. Command policy + enable `RUN_COMMAND` for an allow-list only.
@@ -376,8 +378,8 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 - [~] Preserve patch provenance and failure evidence — `patch_id`/`action_id`/conflict details in results; nothing persisted yet
 
 **C. Git and isolation**
-- [~] Implement Git status and diff — basic status, unstaged diff
-- [ ] Preserve existing user changes during operations
+- [x] Implement Git status and diff — structured status, staged/unstaged/base diffs with stats, repo info
+- [~] Preserve existing user changes during operations — Git mutations are scoped and refuse unsafe cases; worktree removal still force-deletes (Phase 5)
 - [~] Implement worktree creation and lifecycle management — create/remove only
 - [ ] Add safe cleanup, recovery and task isolation
 
@@ -404,7 +406,7 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 - [ ] Coordinate index refreshes and worktrees with Role 3
 - [~] Complete security, failure-injection and performance tests — unit/integration only
 
-`[x]` done · `[~]` partial · `[ ]` pending — **3 / 12 / 11** of 26.
+`[x]` done · `[~]` partial · `[ ]` pending — **4 / 12 / 10** of 26.
 
 ---
 

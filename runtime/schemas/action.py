@@ -15,6 +15,12 @@ ActionType = Literal[
     "WRITE",
     "VALIDATE_PATCH",
     "APPLY_PATCH",
+    "GIT_STATUS",
+    "GIT_INFO",
+    "GIT_STAGE",
+    "GIT_COMMIT",
+    "GIT_BRANCH",
+    "GIT_DISCARD",
 ]
 
 

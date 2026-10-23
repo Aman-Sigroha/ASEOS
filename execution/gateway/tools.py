@@ -1,8 +1,6 @@
 from pydantic import BaseModel, ConfigDict, Field
 
-from execution.commands.runner import run_command
 from execution.gateway.capabilities import (
-    CAP_GIT_READ,
     CAP_SHELL_RUN,
     CAP_TEST_RUN,
     DEFAULT_CAPABILITIES,
@@ -14,6 +12,15 @@ from execution.gateway.fs_tools import (
     ReadTool,
     SearchTool,
     WriteTool,
+)
+from execution.gateway.git_tools import (
+    GitBranchTool,
+    GitCommitTool,
+    GitDiffTool,
+    GitDiscardTool,
+    GitInfoTool,
+    GitStageTool,
+    GitStatusTool,
 )
 from execution.gateway.patch_tools import PatchApplyTool, PatchValidateTool
 from execution.gateway.tool import (
@@ -54,25 +61,6 @@ class RunTestTool(Tool):
     def run(self, context: ToolContext, args: NoArgs) -> ToolOutput:
         result = run_tests(str(context.workspace))
         return _command_output(result, failure_category="TEST_FAILURE")
-
-
-class GitDiffTool(Tool):
-    spec = ToolSpec(
-        name="git.diff",
-        action_type="GIT_DIFF",
-        description="Return the unstaged Git diff of the workspace.",
-        args_model=NoArgs,
-        capabilities=frozenset({CAP_GIT_READ}),
-        read_only=True,
-        idempotent=True,
-        timeout_seconds=30,
-    )
-
-    def run(self, context: ToolContext, args: NoArgs) -> ToolOutput:
-        result = run_command(
-            ["git", "diff", "--"], cwd=str(context.workspace), timeout=10
-        )
-        return _command_output(result, failure_category="GIT_FAILURE")
 
 
 class RunCommandTool(Tool):
@@ -130,6 +118,12 @@ def default_tools() -> list[Tool]:
         PatchValidateTool(),
         PatchApplyTool(),
         RunTestTool(),
+        GitStatusTool(),
         GitDiffTool(),
+        GitInfoTool(),
+        GitStageTool(),
+        GitCommitTool(),
+        GitBranchTool(),
+        GitDiscardTool(),
         RunCommandTool(),
     ]

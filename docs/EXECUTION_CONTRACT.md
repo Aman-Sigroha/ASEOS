@@ -30,7 +30,13 @@ The workspace is trusted gateway context (`ToolContext`); it is never taken from
 | `patch.apply` | `APPLY_PATCH` | `fs.write` (+ `fs.delete` to delete files) | no | `{patch, base?, reverse?}`; see §2.2 |
 | `repo.write` | `WRITE` | `fs.write` | no | `{path, content, expected_sha256?}`; see §2.1 |
 | `test.run` | `RUN_TEST` | `test.run` | no | `python -m pytest` |
-| `git.diff` | `GIT_DIFF` | `git.read` | yes | unstaged diff |
+| `git.status` | `GIT_STATUS` | `git.read` | yes | `{max_entries?}`; structured branch/staged/unstaged/untracked/conflicted/state |
+| `git.diff` | `GIT_DIFF` | `git.read` | yes | `{mode='unstaged'\|'staged'\|'base', base?, paths?, include_untracked=true, max_bytes?, context?}`; stdout is the diff text, `data` has base, files, stats; see §2.3 |
+| `git.info` | `GIT_INFO` | `git.read` | yes | `{max_branches?, max_commits?}`; identity, HEAD, branches, recent commits, relevant config |
+| `git.stage` | `GIT_STAGE` | `git.write` | no | `{paths, expected_sha256?}` |
+| `git.commit` | `GIT_COMMIT` | `git.write` | no | `{message, paths}` |
+| `git.branch_create` | `GIT_BRANCH` | `git.write` | no | `{name, start_point?}`; does not check out |
+| `git.discard` | `GIT_DISCARD` | `git.discard` | no | `{paths}`; returns the discarded diff |
 | `shell.run` | `RUN_COMMAND` | `shell.run` | no | **Not granted by default; always denied** until a command policy exists |
 
 Tool ids use the planned namespaces (`repo.*`, `git.*`, `shell.*`, `test.*`, `patch.*`). The runtime's
@@ -58,7 +64,18 @@ canonical id. Aligning Role 1's registry names is an open item.
 - **Undo:** pass the previous `applied_diff` with `reverse=true`. Reversing a create is a delete and so needs `fs.delete`.
 - **Encoding/line endings:** UTF-8; added lines use the file's dominant line ending; permission bits of existing files are preserved on POSIX.
 
-Default granted capabilities: `fs.read`, `fs.write`, `git.read`, `test.run`. Not granted by default: `fs.delete`, `shell.run`.
+### 2.3 Git semantics
+
+- **Scope:** every git tool requires the workspace to be the repository (or linked worktree) root; otherwise `GIT_FAILURE`. Paths are workspace-relative, literal (no globs), and must not be absolute or contain `..`.
+- **`git.diff` bases:** `unstaged` = working tree vs index; `staged` = index vs HEAD; `base` = working tree vs the commit `base` resolves to (`data.base_commit`). `data.base` says in words what the comparison is. Untracked files are included as added files unless `include_untracked=false` (not for `staged`).
+- **`git.stage`:** named files only (no directories, `.`, globs, duplicates; `.git`/`.env` refused). `expected_sha256` ({path: hash, null = deleted}) refuses to stage a file that changed since you produced it (`PATCH_CONFLICT`). Refused during merge/rebase or with conflicts.
+- **`git.commit`:** the index must contain *exactly* `paths`, otherwise `GIT_FAILURE` with `unexpected_staged` / `missing_staged`. A staged rename needs both the old and new path. Refused on detached HEAD, during merge/rebase, or with conflicts. Message ≤4000 chars; passed as an argument, never through a shell. The repository's hooks and signing settings still apply.
+- **`git.branch_create`:** validates the name with `git check-ref-format`, refuses an existing branch, never checks out or moves anything.
+- **`git.discard`:** tracked files with unstaged changes only; refuses untracked, unchanged, staged or conflicted files, and refuses if the discarded diff exceeds 1 MB (it could not be returned). `data.discarded_diff` can be re-applied with `patch.apply`.
+- **Evidence on every mutation:** `data.other_changes` (dirty paths outside the operation's scope, before it ran) and `data.status_after` (counts).
+- **Locks:** a Git index lock held by another process gives `GIT_FAILURE` with `data.lock_conflict=true`; retry later.
+
+Default granted capabilities: `fs.read`, `fs.write`, `git.read`, `test.run`. Not granted by default: `fs.delete`, `git.write`, `git.discard`, `shell.run`.
 
 ## 3. `ExecutionResult`
 
@@ -91,7 +108,7 @@ are unaffected.
 | `CANCELLED` | Reserved (cancellation not yet implemented) |
 | `PROCESS_FAILURE` | Command could not start or errored |
 | `PATCH_CONFLICT` | Patch target missing/ambiguous/changed; hunk context mismatch; base hash mismatch; `repo.write` hash mismatch |
-| `GIT_FAILURE` | Git command failed |
+| `GIT_FAILURE` | Git command failed; not a repository / not the root; unsafe repository state (merge, detached HEAD); index does not match the commit scope |
 | `TEST_FAILURE` | Test command ran and tests failed |
 | `INTERNAL_ERROR` | Unexpected exception in a tool |
 
@@ -114,5 +131,5 @@ See [EXECUTION_PLAN.md](EXECUTION_PLAN.md) for the scheduled work.
 4. Add gateway-level tests for success, invalid arguments, denied capability and each error category.
 
 `ActionType` in `runtime/schemas/action.py` gates which action types exist; new ones need a (backward-compatible) schema
-change. `LIST_DIR`, `FILE_INFO`, `WRITE`, `VALIDATE_PATCH` and `APPLY_PATCH` were added that way. They are **not yet** in Role 1's `ToolRegistry.default()`,
+change. `LIST_DIR`, `FILE_INFO`, `WRITE`, `VALIDATE_PATCH`, `APPLY_PATCH`, `GIT_STATUS`, `GIT_INFO`, `GIT_STAGE`, `GIT_COMMIT`, `GIT_BRANCH` and `GIT_DISCARD` were added that way. They are **not yet** in Role 1's `ToolRegistry.default()`,
 so the planner cannot offer them until Role 1 registers them.
