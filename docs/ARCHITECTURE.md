@@ -73,7 +73,8 @@ ASEOS/
 │   ├── gateway/              ExecutionGateway (dispatcher), Tool/ToolSpec protocol, capabilities,
 │   │                         fs_tools.py (read/list/info/search/replace/write), patch_tools.py (patch.validate/apply),
 │   │                         git_tools.py (git.status/diff/info/stage/commit/branch_create/discard),
-│   │                         command_tools.py (shell.run, test.run), tools.py (default_tools)
+│   │                         command_tools.py (shell.run, test.run), tools.py (default_tools),
+│   │                         disposition.py (retry/replan/escalate/abort + which tools need approval)
 │   ├── patches/              unified.py (diff parser), engine.py (plan/validate/apply/rollback/report),
 │   │                         fileio.py (atomic write), apply.py (legacy exact-text replace used by execute_task)
 │   ├── git/                  operations.py (status, diff), worktree.py (create/remove);
@@ -89,6 +90,7 @@ ASEOS/
 │   ├── artifacts/            store.py (content store, retention, quota, gc), redact.py, sink.py (per-action handle),
 │   │                         records.py (audit records), consistency.py (evidence checks)
 │   ├── versioning.py         workspace_version(): content fingerprint used to date test results
+│   ├── notify.py             WorkspaceChange events + repo identity for Role 3 (gateway.add_change_listener)
 │   ├── verification/         checks.py (8 check kinds), service.py (run_checks → evidence), evidence.py,
 │   │                         globs.py, verifier.py (ExecutionVerifier = Role 1 Verifier adapter)
 │   ├── tests/                unit tests for the execution modules (+ empty runner.py placeholder)
@@ -124,6 +126,15 @@ ASEOS/
 - **Tool registry:** `ToolRegistry.default()` lists the capabilities the agent may use; one tool per action type.
 
 ## 6. Role 4 — execution in brief
+
+### 6.0 How the runtime meets the gateway (Phase 12)
+
+`RealActionExecutor` is the adapter. It also derives what the runtime needs from the gateway so the two cannot drift:
+`tool_registry()` (every tool, enabled only if granted), `decision_policy()` (action types needing approval),
+`runtime_options()` (both, as `AgentRuntime` keyword arguments), `recover()` (unfinished work from an earlier run,
+reported as a `RECOVERY_REPORTED` event, never acted on) and `grant()` (an approval, from trusted code only). Failed
+results carry a `disposition`; the executor retries only the ones that are safe to repeat. Codebase intelligence
+subscribes with `gateway.add_change_listener()`. Details: [EXECUTION_CONTRACT.md §2.11](EXECUTION_CONTRACT.md).
 
 ### 6.1 The execution boundary
 
@@ -278,7 +289,7 @@ artifacts, command policy and sandboxing — will be added in slices so the runt
   `tests/agent/test_real_executor_integration.py`.
 - Role 1 suites: `tests/agent`, `decision`, `events`, `llm`, `planner`, `schemas`, `state`, `task`, `tools`,
   `verification`.
-- Baseline at time of writing: **1138 passed, 6 skipped** (symlink-file and POSIX-mode tests skip when the OS does not allow
+- Baseline at time of writing: **1184 passed, 6 skipped** (symlink-file and POSIX-mode tests skip when the OS does not allow
   them; a Windows directory-junction test covers the same escape). `pyproject.toml` `testpaths` limits default collection to `tests/`
   and `execution/tests/`; the deliberately broken `fixtures/repositories/calculator` test (which the demo fixes)
   is not collected.

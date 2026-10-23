@@ -83,6 +83,74 @@ class AgentRuntime:
 
         self.event_emitter.emit(event)
 
+    async def _report_recovery(self, task_id: str) -> None:
+        """Surface unfinished work from an earlier run before this one starts.
+
+        Only reports: it never retries, rolls back or deletes anything. A
+        failing report must not stop the task."""
+
+        recover = getattr(self.executor, "recover", None)
+
+        if recover is None:
+            return
+
+        try:
+            report = await recover()
+        except Exception as exc:
+            self._emit(
+                task_id=task_id,
+                event_type="RECOVERY_REPORTED",
+                message="Recovery check failed.",
+                data={"error": f"{type(exc).__name__}: {exc}"},
+            )
+            return
+
+        if not report or not report.get("needs_attention"):
+            return
+
+        self._emit(
+            task_id=task_id,
+            event_type="RECOVERY_REPORTED",
+            message="Unfinished work from an earlier run needs attention.",
+            data=report,
+        )
+
+    @staticmethod
+    def _execution_details(result) -> dict:
+        """Fields of an ExecutionResult worth putting on an event. Only keys
+        that are set, so executors that do not produce them add nothing."""
+
+        details: dict = {}
+
+        if getattr(result, "tool", None):
+            details["tool"] = result.tool
+
+        if getattr(result, "error_category", None):
+            details["error_category"] = result.error_category
+
+        if getattr(result, "truncated", False):
+            details["truncated"] = True
+
+        artifacts = getattr(result, "artifacts", None)
+
+        if artifacts:
+            details["artifact_ids"] = [ref.id for ref in artifacts]
+
+        data = getattr(result, "data", None) or {}
+
+        for key in (
+            "execution_record",
+            "disposition",
+            "attempts",
+            "missing_capabilities",
+            "approvable",
+            "artifact_errors",
+        ):
+            if key in data:
+                details[key] = data[key]
+
+        return details
+
     async def prepare(
         self,
         task: Task,
@@ -100,6 +168,8 @@ class AgentRuntime:
             event_type="TASK_STARTED",
             message="Task started",
         )
+
+        await self._report_recovery(task.id)
 
         state.status = "ANALYZING"
 
@@ -452,6 +522,7 @@ class AgentRuntime:
                     data={
                         "action_type": action.type,
                         "exit_code": result.exit_code,
+                        **self._execution_details(result),
                     },
                 )
 
@@ -467,6 +538,7 @@ class AgentRuntime:
                 data={
                     "action_type": action.type,
                     "duration_ms": result.duration_ms,
+                    **self._execution_details(result),
                 },
             )
 

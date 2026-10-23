@@ -23,7 +23,9 @@ from execution.artifacts.store import (
     default_store_for,
     workspace_id,
 )
+from execution.gateway.disposition import disposition_of, requires_approval
 from execution.git.repo import GitError, run_git
+from execution.notify import ChangeListener, WorkspaceChange, changes_from, repo_id_of
 from execution.recovery.lease import LeaseConflict, LeaseLost, WorkspaceLease
 from execution.recovery.locations import state_dir_for
 from execution.recovery.ops import JournalError, NullOperation, OperationsLog
@@ -71,6 +73,9 @@ class ExecutionGateway:
         self.workspace_id = workspace_id(self.workspace)
         self.record_reads = record_reads
         self.observers: list[Callable[[dict[str, Any]], None]] = []
+        self.change_listeners: list[ChangeListener] = []
+        self._repo_id: str | None = None
+        self._repo_id_known = False
         # None = open the default per-repository store on first use;
         # False = artifacts disabled; or an explicit store.
         self._store_setting = artifact_store
@@ -191,6 +196,7 @@ class ExecutionGateway:
                 "WORKSPACE_UNAVAILABLE",
                 str(exc),
                 data={
+                    "not_started": True,
                     "lease_conflict": True,
                     "holder": {
                         k: holder.get(k)
@@ -199,10 +205,16 @@ class ExecutionGateway:
                 },
             ) from exc
         except LeaseLost as exc:
-            raise ToolError("WORKSPACE_UNAVAILABLE", str(exc), data={"lease_lost": True}) from exc
+            raise ToolError(
+                "WORKSPACE_UNAVAILABLE",
+                str(exc),
+                data={"not_started": True, "lease_lost": True},
+            ) from exc
         except OSError as exc:
             raise ToolError(
-                "WORKSPACE_UNAVAILABLE", f"Cannot take the workspace lease: {exc}"
+                "WORKSPACE_UNAVAILABLE",
+                f"Cannot take the workspace lease: {exc}",
+                data={"not_started": True},
             ) from exc
 
     def recover(self, *, terminate_orphans: bool = False) -> dict[str, Any]:
@@ -302,6 +314,7 @@ class ExecutionGateway:
                     "TIMEOUT",
                     f"Waited {self.mutation_wait_seconds:g}s for another change to this "
                     "workspace to finish.",
+                    data={"not_started": True},
                 ) from None
 
         try:
@@ -330,7 +343,7 @@ class ExecutionGateway:
                         raise ToolError(
                             "RESOURCE_LIMIT",
                             f"{exc}; refusing to change the workspace without a recorded intent.",
-                            data={"journal_error": str(exc)},
+                            data={"not_started": True, "journal_error": str(exc)},
                         ) from exc
 
                     sink.errors.append(f"journal: {exc}")
@@ -373,6 +386,58 @@ class ExecutionGateway:
 
         self.observers.append(observer)
 
+    def add_change_listener(self, listener: ChangeListener) -> None:
+        """Called with a WorkspaceChange after an action changed (or may have
+        changed) the workspace. Best effort and synchronous; see
+        execution/notify.py for what is published and what is not."""
+
+        self.change_listeners.append(listener)
+
+    def identity(self) -> dict[str, Any]:
+        """Canonical names of this workspace: path, workspace_id and the
+        repo_id shared by a repository's checkout and its worktrees."""
+
+        if not self._repo_id_known:
+            self._repo_id = repo_id_of(self.workspace)
+            self._repo_id_known = True
+
+        return {
+            "workspace": str(self.workspace),
+            "workspace_id": self.workspace_id,
+            "repo_id": self._repo_id,
+        }
+
+    def workspace_version(self) -> dict[str, Any]:
+        """Fingerprint of the workspace's current content (see versioning.py).
+        Can be slow on a large tree; meant for deciding whether an index is stale."""
+
+        from execution.versioning import workspace_version
+
+        return workspace_version(self.workspace)
+
+    def _notify(self, action: Action, result: ExecutionResult) -> None:
+        if not self.change_listeners:
+            return
+
+        try:
+            changes = changes_from(
+                action,
+                result,
+                workspace=self.workspace,
+                workspace_id=self.workspace_id,
+                task_id=self.task_id,
+                repo_id=self.identity()["repo_id"],
+            )
+        except Exception:  # a notification bug must not change the outcome
+            return
+
+        for change in changes:
+            for listener in list(self.change_listeners):
+                try:
+                    listener(change)
+                except Exception:
+                    pass  # listeners are best-effort
+
     def check_evidence(self, result: ExecutionResult) -> list[str]:
         """Inconsistencies between a result and its own artifacts (see
         execution/artifacts/consistency.py); empty when consistent."""
@@ -411,6 +476,7 @@ class ExecutionGateway:
                 raise ToolError(
                     "UNKNOWN_TOOL",
                     f"Unsupported action type: {action.type}",
+                    data={"not_started": True},
                 )
 
             self._check_capabilities(tool)
@@ -492,6 +558,13 @@ class ExecutionGateway:
 
         result.data.update(sink.failure_data())
 
+        if not result.success:
+            result.data["disposition"] = disposition_of(
+                result.error_category, result.data, tool.spec if tool else None
+            )
+
+        self._notify(action, result)
+
         if tool is None or not (self.record_reads or not tool.spec.read_only):
             return result
 
@@ -559,7 +632,12 @@ class ExecutionGateway:
                 "read_only": tool.spec.read_only,
                 "idempotent": tool.spec.idempotent,
                 "timeout_seconds": tool.spec.timeout_seconds,
+                "description": tool.spec.description,
                 "available": self._permitted(tool),
+                "requires_approval": requires_approval(tool.spec),
+                "missing_capabilities": sorted(
+                    tool.spec.capabilities - self.granted_capabilities
+                ),
             }
             for tool in self._tools.values()
         ]
@@ -570,6 +648,26 @@ class ExecutionGateway:
             and not (tool.spec.capabilities - self.granted_capabilities)
         )
 
+    def _denial_data(self, tool: Tool) -> dict[str, Any]:
+        """What a trusted caller needs to decide whether to approve this tool.
+
+        `approvable` is False when a profile ceiling forbids it, so no grant
+        can make the action run."""
+
+        missing = sorted(tool.spec.capabilities - self.granted_capabilities)
+        ceiling = self.profile.capabilities if self.profile else None
+        level_ok = tool.spec.level <= self.max_level
+        caps_ok = ceiling is None or not (set(missing) - set(ceiling))
+
+        return {
+            "not_started": True,
+            "tool": tool.spec.name,
+            "missing_capabilities": missing,
+            "needs_level": tool.spec.level.name,
+            "max_level": self.max_level.name,
+            "approvable": bool(level_ok and caps_ok),
+        }
+
     def _check_capabilities(self, tool: Tool) -> None:
         if tool.spec.level > self.max_level:
             raise ToolError(
@@ -577,6 +675,7 @@ class ExecutionGateway:
                 f"Tool '{tool.spec.name}' is disabled: it needs execution "
                 f"level {tool.spec.level.name}, but this gateway is limited "
                 f"to {self.max_level.name}.",
+                data={**self._denial_data(tool), "approvable": False},
             )
 
         missing = tool.spec.capabilities - self.granted_capabilities
@@ -587,7 +686,35 @@ class ExecutionGateway:
                 f"Tool '{tool.spec.name}' is disabled: capability "
                 f"{sorted(missing)} has not been granted. It requires a "
                 "separate, explicitly approved execution policy.",
+                data=self._denial_data(tool),
             )
+
+    def grant(self, capabilities: set[str] | frozenset[str]) -> frozenset[str]:
+        """Grant capabilities after an approval. Called by trusted code (the
+        runtime or UI), never by a model. A profile's ceiling still applies:
+        capabilities beyond it are ignored. Returns the capabilities now held."""
+
+        wanted = frozenset(capabilities)
+
+        if self.profile is not None:
+            wanted &= self.profile.capabilities
+
+        self.granted_capabilities = self.granted_capabilities | wanted
+        return self.granted_capabilities
+
+    def revoke(self, capabilities: set[str] | frozenset[str]) -> frozenset[str]:
+        self.granted_capabilities = self.granted_capabilities - frozenset(capabilities)
+        return self.granted_capabilities
+
+    def approval_required_action_types(self) -> set[str]:
+        """Action types whose tool changes state and is not covered by the
+        default grant. The runtime feeds this to its decision policy."""
+
+        return {
+            tool.spec.action_type
+            for tool in self._tools.values()
+            if requires_approval(tool.spec)
+        }
 
     @staticmethod
     def _validate_args(tool: Tool, payload: dict):

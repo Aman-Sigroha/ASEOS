@@ -14,3 +14,11 @@ class ActionExecutor(ABC):
     ) -> ExecutionResult:
         """Execute an action and return its result."""
         raise NotImplementedError
+
+    async def recover(self) -> dict | None:
+        """Report work a previous run left unfinished (None = nothing to report).
+
+        Executors with durable state override this; it must not re-run or undo
+        anything."""
+
+        return None

@@ -4,9 +4,9 @@ Execution, Git, worktrees, command running, sandboxing and testing.
 
 - **Status snapshot date:** 2026-10-23
 - **Branch audited:** `execution` (HEAD `a91605f`)
-- **Test baseline:** `python -m pytest -q` → 1138 passed, 6 skipped (symlink/POSIX-mode tests and the real-container test skip where unavailable), 0 failed (default `testpaths` now exclude the
+- **Test baseline:** `python -m pytest -q` → 1184 passed, 6 skipped (symlink/POSIX-mode tests and the real-container test skip where unavailable), 0 failed (default `testpaths` now exclude the
   intentionally failing `fixtures/` repo). Before the first slices it was 202 passed + 1 fixture failure.
-- **Progress log:** slices A1–A3, B1–B2, C1–C4 (Phase 2 filesystem) C5–C9 (Phase 3 patches) D1–D3, D9 (Phase 4 Git) D4–D8, D11 (Phase 5 worktrees) E1–E5 (Phase 6 commands) H1–H6 (Phase 7 security) F1–F6 (Phase 8 tests) and F7–F8 (Phase 9 verification) and G1–G3 (Phase 10 artifacts, redaction, records) are done; B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
+- **Progress log:** slices A1–A3, B1–B2, C1–C4 (Phase 2 filesystem) C5–C9 (Phase 3 patches) D1–D3, D9 (Phase 4 Git) D4–D8, D11 (Phase 5 worktrees) E1–E5 (Phase 6 commands) H1–H6 (Phase 7 security) F1–F6 (Phase 8 tests) and F7–F8 (Phase 9 verification) and G1–G3 (Phase 10 artifacts, redaction, records) and G4 (Phase 11 recovery) are done; Phase 12 added the Role 1 wiring and the Role 3 change interface; B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
 
 Companion documents: [ARCHITECTURE.md](ARCHITECTURE.md) (how the system fits together),
 [API_CONTRACTS.md](API_CONTRACTS.md) (baseline runtime ↔ execution contract),
@@ -68,10 +68,10 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 | 9 | Deterministic verification evidence | 🟡 PARTIAL | 8 check kinds with traceable evidence, stale/unstable detection, next-step hints and a Role 1 `Verifier` adapter done; Role 1 sign-off, artifact refs (Phase 10) and a `verify.run` action pending |
 | 10 | Artifacts, retention & audit | 🟡 PARTIAL | Artifact store, retention/quota, redaction, execution records, evidence consistency checks, `artifact.read`/`list` and store-failure handling done; Role 1 event forwarding, gc scheduler and report/trace artifacts pending |
 | 11 | Concurrency, interruption & recovery | 🟡 PARTIAL | Serialized mutations, write leases, intent journal, crash reconciliation (never re-runs), orphan-process cleanup with identity checks, git-lock handling and removal protection done and tested with real process deaths; automatic resume and Role 1 hook-up pending |
-| 12 | Cross-role integration | 🟡 PARTIAL | Role 1 wired in; Role 2 and Role 3 pending |
+| 12 | Cross-role integration | 🟡 PARTIAL | Role 1: registry built from the gateway, derived approval set, retry/replan dispositions, execution fields on events, recovery report, cancellation tested. Role 3: change-notification and identity interface tested against a stand-in index. Role 2: contract written, nothing built (no desktop code, no "apply to main checkout"). The runtime's approval flow and resume decisions are Role 1's |
 | 13 | Security, testing & performance qualification | 🟡 PARTIAL | Unit/integration tests only |
 
-**Role 4 completion checklist: 12 ✅ done · 14 🟡 partial · 0 ⬜ pending (of 26)** (an item flips only when its full acceptance criterion is met). See [Section 4](#4-role-4-completion-checklist).
+**Role 4 completion checklist: 12 ✅ done · 13 🟡 partial · 1 ⬜ pending (of 26)** (the previous version of this line said 14 partial / 0 pending; counting the list in Section 4 gave 12 / 12 / 2 before Phase 12) (an item flips only when its full acceptance criterion is met). See [Section 4](#4-role-4-completion-checklist).
 
 ---
 
@@ -277,20 +277,28 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 
 *Completion criterion: a task started from the desktop can inspect and modify a real isolated repo, run tests, return real evidence and recover from a controlled failure.*
 
+Built in slices: **12a** Role 1 wiring and **12b** the Role 3 change interface. **12c** (Role 2) is deliberately not built: there is no desktop code in this repository to integrate with, so only the contract is written down (below).
+
 **Role 1 (runtime)**
 - ✅ `RealActionExecutor` plugs into `AgentRuntime` (`tests/agent/test_real_executor_integration.py`).
 - ✅ End-to-end demo: worktree → patch → tests → diff → cleanup (`python -m execution.demo`, `execute_task`).
-- ⬜ Route runtime actions through the gateway with canonical tool names and normalized results/events.
-- ⬜ Agree approval / elevated-risk representation, retry vs replan semantics, cancellation path.
+- ✅ **Canonical tool names and registry.** `ToolRegistry.from_tool_descriptions(gateway.describe_tools())` (and `RealActionExecutor.tool_registry()`) registers all 24 action types under the gateway's tool names, with their capabilities, `read_only` and `requires_approval`. A tool the gateway has not granted is listed but disabled, so the registry cannot drift from what actually runs. `RealActionExecutor.runtime_options()` returns the `AgentRuntime` arguments (`decision_context_builder`, `decision_policy`) that use it. `ToolRegistry.default()` is unchanged (six hand-written tools) for existing callers; the runtime itself still defaults to it, so a runtime built without `runtime_options()` rejects `WRITE`, `APPLY_PATCH` and the Git/worktree types as "no enabled tool" (found while writing the integration tests).
+- ✅ **Approval representation.** `ExecutionGateway.approval_required_action_types()` is derived from what each tool needs (state-changing and beyond the default grant: `shell.run`, `git.write`, `git.discard`, `worktree.*`, anything at level `elevated`), not from a hand-kept list. `RealActionExecutor.decision_policy()` feeds it to `DecisionPolicy.high_risk_action_types`, so the runtime stops with `REQUEST_APPROVAL` before such an action runs. A `PERMISSION_DENIED` result says what to approve: `data.missing_capabilities`, `needs_level`, `max_level`, `approvable` (false when a profile ceiling forbids it, so no grant can help) and `not_started`. After approval the trusted caller calls `gateway.grant({...})` (a profile ceiling still applies) or `revoke`.
+- ✅ **Retry versus replan.** Every failed result carries `data.disposition = {action, reason, not_started}`: `RETRY` (the action never started — lease held, mutation-queue timeout — or the tool is idempotent and timed out), `REPLAN` (it ran and was rejected: conflict, failing tests, bad arguments, or a non-idempotent timeout whose effect is unknown), `ESCALATE` (permission denied, internal tool error), `ABORT` (cancelled). `RealActionExecutor` repeats only `RETRY` failures, at most `len(retry_delays)` more times (default 2, after 0.5 s and 1.5 s) and records `data.attempts`; everything else goes up to the runtime unchanged.
+- ✅ **Events.** `ACTION_COMPLETED` / `ACTION_FAILED` now carry, when present, `tool`, `error_category`, `truncated`, `artifact_ids`, `execution_record` (the audit artifact id), `disposition`, `attempts`, `missing_capabilities`, `approvable`, `artifact_errors`. Old keys are unchanged and executors that produce none of these add nothing. The full record is fetched with `artifact.read`.
+- ✅ **Recovery hook.** `ActionExecutor.recover()` (default: nothing) is called once per run right after `TASK_STARTED`; `RealActionExecutor` answers from `gateway.recover()`. If work from an earlier run needs attention the runtime emits `RECOVERY_REPORTED` with each interrupted action's verdict, whether it is resumable and the recommendation. It **only reports**: it never retries, rolls back or acknowledges, and a failing check cannot stop the task.
+- ✅ **Cancellation path.** Cancelling `AgentRuntime.run` while a command is running stops the process tree, closes the journal entry and leaves the gateway usable (real-process test; Windows only).
+- 🟡 Not covered: the runtime has no real **approval flow** — `REQUEST_APPROVAL` still ends the task as `FAILED` (Role 1's design to make; the data it needs is now on the event and result); the runtime does not decide resume-versus-replan from the recovery verdicts, nor call `acknowledge()`; the registry is a snapshot (call `runtime_options()` again after a `grant`); `ExecutionVerifier` is not yet the runtime's default verifier; the runtime still defaults to the six-tool registry and a `RUN_COMMAND`-only policy; the runtime does not pick an execution profile per task; Role 1 has not reviewed any of this.
 
-**Role 2 (desktop UI)** — nothing in this repo yet
-- ⬜ Stable APIs for git status/diff, worktree metadata, running commands + output retrieval, patch/conflict reporting, test results, execution state/errors.
-- ⬜ Define semantics of review / apply / discard / commit.
+**Role 2 (desktop UI)** — nothing in this repo yet; contract only
+- 🟡 What the desktop can use today, all through `ExecutionGateway.execute(Action)` and returning normalized `ExecutionResult`s: `GIT_STATUS` / `GIT_DIFF` (changed files, stats, patch text with `truncated` + artifact), `GIT_INFO`, `WORKTREE_LIST` (metadata and status), `RUN_COMMAND` / `RUN_TEST` (bounded excerpts; full output via `READ_ARTIFACT`, listing via `LIST_ARTIFACTS`), `VALIDATE_PATCH` / `APPLY_PATCH` (per-file results; conflicts as `PATCH_CONFLICT` with details), structured test reports (`data.report`, counts, failed cases), execution errors with `error_category` and `disposition`. `gateway.describe_tools()` lists what exists and whether it is available or needs approval; `gateway.recover()` reports unfinished work.
+- ⬜ Not built: a UI-facing facade, and **review / apply / discard / commit semantics**. Today: *review* = `GIT_DIFF` with `mode=base` in the task's worktree; *commit* = `GIT_STAGE` + `GIT_COMMIT` on the task branch (needs `git.write`, i.e. approval); *discard* = `WORKTREE_REMOVE` with `discard_unreviewed` (needs `worktree.discard`; the work is backed up first). **Applying the result to the user's main checkout (merging the task branch) does not exist.** Decide with Role 2 whether that is a merge, a cherry-pick or a patch, and who grants it.
 
-**Role 3 (codebase intelligence)** — `intelligence/` modules are currently empty placeholders
-- ⬜ Canonical workspace/worktree identity and version identifier.
-- ⬜ File-change and worktree create/remove notifications; index invalidation/refresh interface.
-- ⬜ Integration test: worktree → search symbol → modify via Role 4 → refresh → new content visible, main checkout untouched.
+**Role 3 (codebase intelligence)** — `intelligence/` modules are still empty placeholders
+- ✅ **Change notification interface** (`execution/notify.py`): `gateway.add_change_listener(fn)` delivers a `WorkspaceChange` after an action changed the workspace — `files_changed` (exact paths; `repo.write`, `repo.edit`, `patch.apply`, `git.discard`), `committed` (with the new `head`), `worktree_created` / `worktree_removed` (id, path, branch, base commit), and `unknown_changes` (a program ran; rescan). Reads, failures, denials, test runs and index-only Git operations publish nothing. Listeners are best effort and synchronous: a listener that raises is ignored.
+- ✅ **Identity.** `gateway.identity()` → `workspace` (path), `workspace_id` (hash of the path; also the artifact scope) and `repo_id` (hash of the git common dir, **shared by a checkout and all its worktrees** and equal to `WorktreeManager.repo_id`); each worktree has its own `workspace_id`, so its index key is `(repo_id, workspace_id)`. `gateway.workspace_version()` is the content fingerprint for deciding whether an index is stale.
+- ✅ Integration test: worktree → text search in an index → modify through the gateway → the index refreshes from the event alone → new content visible, main checkout and its HEAD untouched. **The index in that test is a small stand-in written for the test**; no real indexer exists yet.
+- 🟡 Not covered: delivery is in-process and not persisted — a consumer that cannot afford a missed event must compare `workspace_version()`; `execute_task` and direct `WorktreeManager` use bypass the gateway and so publish nothing; changes made by a program are only `unknown_changes`; the interface has not been reviewed by Role 3.
 
 ### Phase 13 — Security, testing and performance qualification 🟡 PARTIAL
 
@@ -335,7 +343,7 @@ sandbox → tests → verification → recovery/artifacts → integration/securi
 - ✅ A1. Validate `task_id` in worktree create/remove + tests (issue 1).
 - ✅ A2. `pyproject.toml` `testpaths` so the default suite is green (issue 10). Also fixed git/command output decoding and made the git-operations tests use a temp repo instead of the live checkout.
 - ✅ A3. `ErrorCategory`, `ArtifactRef` and backward-compatible `ExecutionResult` extensions + `docs/EXECUTION_CONTRACT.md`.
-- ⬜ A4. Agree canonical tool names with Role 1 (needs Role 1 input); add an alias table (old → new).
+- 🟡 A4. Canonical tool names: the runtime registry is now built from the gateway's names (no alias table needed); **Role 1 sign-off pending**.
 
 **Slice group B — Gateway**
 - ✅ B1. `Tool` protocol + registry-backed `ExecutionGateway`; `RealActionExecutor` delegates to it.
@@ -346,19 +354,19 @@ sandbox → tests → verification → recovery/artifacts → integration/securi
 **Slice group C — Filesystem & patches**
 - ✅ C1. Read limits (size, line range, binary detect) → ✅ C2. list/metadata/exists → ✅ C3. symlink policy tests.
 - ✅ C4. Safe write tool with expected-hash conflict check. (Not restricted to worktrees: it works in whatever workspace the gateway is bound to.)
-- ⬜ C4b. Notify Role 3 of changed files (needs the Role 3 interface); register `LIST_DIR`/`FILE_INFO`/`WRITE` in Role 1's `ToolRegistry` (needs Role 1 decision).
+- ✅ C4b. Notify Role 3 of changed files (`execution/notify.py`); `LIST_DIR`/`FILE_INFO`/`WRITE` registered via `ToolRegistry.from_tool_descriptions` (Phase 12).
 - ✅ C5. Unified-diff parser (+ reverse) → ✅ C6. validate-only (`patch.validate`) → ✅ C7. apply with rollback and actual-diff reporting (`patch.apply`) → ✅ C8. multi-file/create/delete (`fs.delete` gated) → 🟡 C9. provenance (`patch_id` + `action_id`; persistence pending).
 - ⬜ C10. Migrate `execute_task` and the legacy replace onto the unified engine, then retire `apply_patch`.
-- ⬜ C11. Register `VALIDATE_PATCH` / `APPLY_PATCH` (and the Phase 2 types) in Role 1's `ToolRegistry`.
+- ✅ C11. `VALIDATE_PATCH` / `APPLY_PATCH` (and the Phase 2 types) registered via the gateway-built registry (Phase 12); 🟡 the runtime's own default registry is still the six-tool one.
 
 **Slice group D — Git & worktrees**
 - ✅ D1. Consolidate git status/diff modules; error mapping. ✅ D2. Staged/untracked/rename/stat/base-explicit diff. ✅ D3. Repo identity.
 - ✅ D4. Worktree metadata registry. ✅ D5. Dirty-check before removal; `execute_task` no longer auto-destroys work. ✅ D6. Managed-area-only cleanup. ✅ D7. Locking. ✅ D8. Restart reconciliation.
-- ⬜ D12. Register the `WORKTREE_*` action types in Role 1's `ToolRegistry`/policy and decide who grants `worktree.manage` / `worktree.discard` (runtime or UI after user approval).
-- ⬜ D13. Tell Role 3 about worktree create/remove and give each worktree its own index key (needs the Role 3 interface).
+- 🟡 D12. `WORKTREE_*` are registered and approval-gated (Phase 12); **who grants** `worktree.manage` / `worktree.discard` after approval is still a Role 1/2 decision (`gateway.grant` is the mechanism).
+- ✅ D13. `worktree_created` / `worktree_removed` events; index key `(repo_id, workspace_id)` (Phase 12). 🟡 not reviewed by Role 3.
 - ✅ D14. Lease/heartbeat so a second live owner of the same worktree can be detected (Phase 11).
 - ✅ D9. Mutating git ops (branch → stage selected → commit → scoped discard), each behind its own capability.
-- ⬜ D10. Register `GIT_STATUS`, `GIT_INFO`, `GIT_STAGE`, `GIT_COMMIT`, `GIT_BRANCH`, `GIT_DISCARD` in Role 1's `ToolRegistry` and risk policy (the mutating ones should require approval).
+- ✅ D10. Git types registered; the mutating ones are in the derived approval set (Phase 12).
 - ✅ D11. `execute_task` uses the structured diff (`mode=base`, untracked included).
 
 **Slice group E — Commands & sandbox**
@@ -366,7 +374,7 @@ sandbox → tests → verification → recovery/artifacts → integration/securi
 - ⬜ E3b. Run the process tests on Linux/macOS (CI) and fix whatever they reveal.
 - ✅ H1. Threat model + `SECURITY_MODEL.md`. ✅ H2. Path hardening (Windows names/ADS, protected and managed areas). ✅ H3. Secret-file read policy incl. `git.diff` redaction. ✅ H4. Execution levels and profiles. ✅ H5. Sandbox interface + container backend + fail-closed. ✅ H6. Cross-task isolation tests.
 - ⬜ H7. **Run the sandbox tests against a real Docker/Podman daemon** (and add that run to CI); fix what they reveal. Until then the container boundary is unproven.
-- ⬜ H8. Agree level and profile names with Role 1; have the runtime pick a profile per task and ask the user before `elevated`.
+- 🟡 H8. Approval is now derived from level and capabilities (`requires_approval`); **the runtime still does not pick a profile per task** and has no approval dialog.
 - ⬜ H9. Image provisioning: build/select an image containing the project's toolchain; decide how dependencies get in without network.
 - ⬜ H10. Native fallbacks (bubblewrap on Linux, AppContainer on Windows) and a VM-backed backend for hostile code.
 - ⬜ E9. Route Role 1's `CommandVerifier` through `run_process` / the policy (needs Role 1).
@@ -377,12 +385,12 @@ sandbox → tests → verification → recovery/artifacts → integration/securi
 - ✅ F1. Detect pytest/unittest from config (project interpreter/venv still ⬜). ✅ F2. JUnit XML parse → `RunReport` (+ `to_runtime_result`). ✅ F3. Targeted runs. ✅ F4. npm/Maven/Gradle/Cargo/Go adapters (unverified against real tools).
 - ⬜ F4b. Run the non-Python adapters against real projects and fix what breaks. ⬜ F4c. Use the project's own interpreter/venv.
 - ✅ F5. Record workspace revision on each test run; ✅ F6. staleness check (`test.freshness`); ✅ F7. check kinds (tests/build/lint/typecheck/file exists/file content/diff contains/prohibited paths); ✅ F8. `ExecutionVerifier` hands the evidence to Role 1 as a `VerificationResult`.
-- ⬜ G4b. Call `gateway.recover()` / `acknowledge()` from Role 1's runtime at task start and decide resume vs replan from the verdicts; extend checkpoints to `patch.replace`, `git.stage`, `git.branch_create`, `git.discard`; verify the POSIX orphan path on Linux/macOS (CI).
+- 🟡 G4b. The runtime now calls `recover()` at task start and emits `RECOVERY_REPORTED` (report only, Phase 12). **Still open:** `acknowledge()` and deciding resume vs replan from the verdicts; extend checkpoints to `patch.replace`, `git.stage`, `git.branch_create`, `git.discard`; verify the POSIX orphan path on Linux/macOS (CI).
 - ⬜ F9. Replace `CommandVerifier` with `ExecutionVerifier` in the real composition (needs Role 1) — same as E9. ⬜ F10. `verify.run` gateway action + check specs in Role 1's task/plan schema. ⬜ F11. Include git-ignored files in the prohibited-path check.
 
 **Slice group G — Artifacts, recovery, integration**
 - ✅ G1. Artifact store + bounded results (+ `artifact.read`/`artifact.list`). ✅ G2. Redaction. ✅ G3. Execution records and the running-operations table (Phase 11). ✅ G4. Reconcile on restart (`gateway.recover()`). G5. Failure-injection suite.
-- ⬜ G1b. Forward execution records into Role 1's `EventEmitter` (needs Role 1). ⬜ G1c. Schedule `store.gc()`; retain raw JUnit/build reports and traces; register `READ_ARTIFACT`/`LIST_ARTIFACTS` in Role 1's `ToolRegistry`.
+- ✅ G1b. Execution fields (`execution_record` id, `artifact_ids`, `error_category`, `disposition`, …) are on `ACTION_*` events (Phase 12); the full record is read with `artifact.read`. 🟡 G1c. `READ_ARTIFACT`/`LIST_ARTIFACTS` registered (Phase 12); **still open:** schedule `store.gc()`; retain raw JUnit/build reports and traces.
 - G6. Role 1 end-to-end through the gateway. G7. Role 2 API surface. G8. Role 3 change notifications + index-refresh test. G9. Security + performance suites.
 
 ---
@@ -393,8 +401,8 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 
 **A. Execution foundations**
 - [x] Audit the execution scaffold and current runtime contracts
-- [~] Implement the execution gateway and typed tool adapters — executor exists, no gateway/typed adapters
-- [~] Normalize errors, output and execution metadata — `ExecutionResult` only; no taxonomy/extensions
+- [~] Implement the execution gateway and typed tool adapters — gateway and 24 typed tools exist; Role 1 sign-off on names/schemas pending
+- [~] Normalize errors, output and execution metadata — error taxonomy, dispositions, truncation, artifacts and records done; Role 1 sign-off pending
 
 **B. Files and patches**
 - [x] Implement secure filesystem read operations — bounded READ with line ranges, list, file info, SEARCH, symlink policy
@@ -426,12 +434,12 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 - [~] Handle interruption, concurrency and crash recovery — serialization, leases, journal, reconciliation and orphan cleanup done and failure-injection tested on Windows; automatic resume, Role 1 hook-up and POSIX verification pending
 
 **G. Integration and quality**
-- [~] Connect real tools to the Role 1 runtime — `RealActionExecutor` wired; no gateway
+- [~] Connect real tools to the Role 1 runtime — wired through the gateway with a gateway-built registry, derived approval set, dispositions, event fields, recovery report and cancellation tested; the runtime's approval flow, resume decisions and default adoption (registry, `ExecutionVerifier`) are Role 1's
 - [ ] Integrate output, diffs and tests with Role 2
-- [ ] Coordinate index refreshes and worktrees with Role 3
+- [~] Coordinate index refreshes and worktrees with Role 3 — change/identity interface built and tested against a stand-in index; no real indexer, not reviewed by Role 3
 - [~] Complete security, failure-injection and performance tests — unit/integration only
 
-`[x]` done · `[~]` partial · `[ ]` pending — **12 / 14 / 0** of 26.
+`[x]` done · `[~]` partial · `[ ]` pending — **12 / 13 / 1** of 26.
 
 ---
 
@@ -460,11 +468,11 @@ rather than preserving it for review.
 
 | Shared contract | Roles | Status |
 | --------------- | ----- | ------ |
-| Tool names, schemas, execution results | 1 & 4 | ⬜ names not aligned; result schema is baseline only |
-| Task / action / event lifecycle | 1 & 4 (2 presents) | 🟡 events exist; execution-side events limited to `execute_task` |
-| Approval & elevated-risk operations | 1 & 4 (2 UI) | 🟡 Role 1 policy treats `RUN_COMMAND` as high-risk; Role 4 refuses it outright |
-| Workspace identity & path conventions | 2, 3, 4 (+1) | ⬜ |
-| Repo-context refresh after edits | 3 & 4 | ⬜ |
+| Tool names, schemas, execution results | 1 & 4 | 🟡 the runtime registry takes the gateway's names and capabilities; result schema extended; **Role 1 sign-off pending** |
+| Task / action / event lifecycle | 1 & 4 (2 presents) | 🟡 `ACTION_*` events carry execution fields and `RECOVERY_REPORTED` exists; no streaming of live output |
+| Approval & elevated-risk operations | 1 & 4 (2 UI) | 🟡 representation in code (derived approval set, `missing_capabilities`/`approvable`, `gateway.grant`); **no approval flow in the runtime or UI** |
+| Workspace identity & path conventions | 2, 3, 4 (+1) | 🟡 `gateway.identity()` = path + `workspace_id` + `repo_id`; Roles 2 and 3 not yet consulted |
+| Repo-context refresh after edits | 3 & 4 | 🟡 `WorkspaceChange` events + `workspace_version()`; Role 3 has not implemented a listener |
 | Worktree ownership & lifecycle | 1 & 4 | ⬜ → `WORKTREE_LIFECYCLE.md` |
 | Diff / patch / finalization semantics | 2 & 4 | ⬜ |
 | Test results & verification status | 1 & 4 (2 presents) | 🟡 proposal built: Role 1's `VerificationStatus` is the single verdict, Role 4 supplies evidence + `next_steps` via optional fields; **Role 1 sign-off pending** |

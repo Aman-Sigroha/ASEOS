@@ -105,6 +105,8 @@ through the `git.*` tools.
 - Artifacts (command logs, reports, patches, records) are plain files under the repository's `.git/aseos/artifacts` (or a temp folder for non-Git directories), readable by anything running as the same OS user and not encrypted. Redaction before storage is best-effort pattern matching; a secret without a recognizable shape and without an environment entry is stored as-is. Retention is enforced on read and by `store.gc()`, which the host must schedule.
 - Time-of-check/time-of-use gaps remain between a path check and the file operation (tiny, but not zero). Concurrent changes to one workspace are serialized within a gateway and, for managed worktrees (or `lease=True`), across gateways by a write lease; other workspaces have no cross-process exclusion.
 - Recovery state (leases, the operations journal) is plain files next to the repository; anything running as the same OS user can alter it. Orphan termination requires a matching process creation token, which exists on Windows and Linux only.
+- Approval is only as strong as the caller of `gateway.grant()`. It is a Python method for trusted code (the runtime or UI after a human said yes), never reachable from a model-supplied payload, and a profile's capability ceiling still applies. Today no runtime or UI code asks a human: an action needing approval simply stops the task.
+- Change notifications (`gateway.add_change_listener`) name paths and commits, not content, but they run in-process with the gateway's privileges, are not authenticated and are not persisted.
 - Disk usage inside a workspace is not limited.
 
 ## 7. Execution levels and profiles

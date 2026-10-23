@@ -8,6 +8,11 @@ class ToolDefinition(BaseModel):
     description: str = Field(min_length=1)
     action_type: ActionType
     enabled: bool = True
+    # Filled in when the registry is built from an execution gateway; the
+    # hand-written defaults leave them unset.
+    capabilities: list[str] = Field(default_factory=list)
+    read_only: bool | None = None
+    requires_approval: bool = False
 
 
 class ToolRegistry:
@@ -50,6 +55,38 @@ class ToolRegistry:
 
     def list_available(self) -> list[ToolDefinition]:
         return [tool for tool in self._tools.values() if tool.enabled]
+
+    def requiring_approval(self) -> set[str]:
+        """Action types whose tool is registered as needing human approval."""
+
+        return {
+            tool.action_type
+            for tool in self._tools.values()
+            if tool.enabled and tool.requires_approval
+        }
+
+    @classmethod
+    def from_tool_descriptions(cls, descriptions: list[dict]) -> "ToolRegistry":
+        """Build a registry from an execution gateway's `describe_tools()`.
+
+        The gateway is the source of truth for what exists, what it needs and
+        whether it is available, so the registry cannot drift from it. A tool
+        the gateway has not granted is registered but disabled."""
+
+        return cls(
+            tools=[
+                ToolDefinition(
+                    name=item["name"],
+                    description=item.get("description") or item["name"],
+                    action_type=item["action_type"],
+                    enabled=bool(item.get("available", True)),
+                    capabilities=list(item.get("capabilities", [])),
+                    read_only=item.get("read_only"),
+                    requires_approval=bool(item.get("requires_approval", False)),
+                )
+                for item in descriptions
+            ]
+        )
 
     @classmethod
     def default(cls) -> "ToolRegistry":

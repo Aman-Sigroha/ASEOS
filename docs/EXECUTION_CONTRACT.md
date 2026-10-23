@@ -167,6 +167,14 @@ Verification is a layer *above* the gateway, not a tool: it runs typed checks by
 
 Default granted capabilities: `fs.read`, `fs.write`, `git.read`, `test.run`. Not granted by default: `fs.delete`, `fs.read_secrets`, `git.write`, `git.discard`, `worktree.manage`, `worktree.discard`, `shell.run`, `shell.network`.
 
+### 2.11 Integration with the runtime and other roles
+
+- **Registry.** `ToolRegistry.from_tool_descriptions(gateway.describe_tools())`: one `ToolDefinition` per tool (`name` = the gateway tool name, `capabilities`, `read_only`, `requires_approval`, `enabled` = available under the current grant). `RealActionExecutor.runtime_options()` gives `AgentRuntime` this registry and the matching `DecisionPolicy`; without it the runtime's default six-tool registry rejects the other action types.
+- **Approval.** A tool `requires_approval` when it is not read-only and either needs a capability outside the default grant or is at level `elevated`. A denied call returns `PERMISSION_DENIED` with `data = {not_started, tool, missing_capabilities, needs_level, max_level, approvable}`. After approval the trusted caller runs `gateway.grant({...})`; a profile's capability ceiling is never exceeded and `approvable` is `false` when it would be.
+- **`data.disposition`** on every failed result: `{action, reason, not_started}` with `action` ∈ `RETRY` (never started, or idempotent and timed out), `REPLAN`, `ESCALATE` (permission denied, internal error), `ABORT` (cancelled). `data.not_started` is set when a failure happened before the tool ran (unknown tool, denied, lease held, mutation-queue timeout, journal refused). `RealActionExecutor` repeats only `RETRY` results (`retry_delays`, default two extra attempts) and sets `data.attempts`.
+- **Events.** `ACTION_COMPLETED`/`ACTION_FAILED` add, when present: `tool`, `error_category`, `truncated`, `artifact_ids`, `execution_record`, `disposition`, `attempts`, `missing_capabilities`, `approvable`, `artifact_errors`. `RECOVERY_REPORTED` (data: `needs_attention`, `interrupted[]` with `op_id`, `action_id`, `tool`, `verdict`, `resumable`, `recommendation`; or `error`) is emitted after `TASK_STARTED` when `ActionExecutor.recover()` reports unfinished work.
+- **Change notifications (Role 3).** `gateway.add_change_listener(fn)`; `fn(WorkspaceChange)` with `kind` ∈ `files_changed`, `committed`, `worktree_created`, `worktree_removed`, `unknown_changes`, plus `workspace`, `workspace_id`, `repo_id`, `task_id`, `action_id`, `tool`, `paths`, `head`, `worktree`. Published after the result exists, only for actions that changed state (a program that was started publishes `unknown_changes` even if it failed). Synchronous and best effort: exceptions are swallowed, nothing is persisted or replayed. `gateway.identity()` and `gateway.workspace_version()` give the identity and the staleness check.
+
 ### 2.6 Security semantics (details in [SECURITY_MODEL.md](SECURITY_MODEL.md))
 
 - **Levels and profiles.** Every tool declares an `ExecutionLevel` (`READ_ONLY` < `LOW_RISK_MUTATION` < `DEV_EXECUTION` < `ELEVATED`; undeclared = `ELEVATED`). `ExecutionGateway(profile="read_only"|"worktree_edit"|"dev"|"elevated")` limits both the level and the capabilities (the profile is a ceiling). A tool above the gateway's level returns `PERMISSION_DENIED` naming both levels. Without a profile the gateway is limited by capabilities only (backward compatible). `gateway.describe_tools()` lists each tool's level, capabilities, timeout and whether it is available.
@@ -217,10 +225,10 @@ are unaffected.
 - The policy decides what may *start*; it cannot constrain what an allowed program then does. Network and filesystem access of
   allowed commands are not blocked until the sandbox (Phase 7). `HOME`/`USERPROFILE` are passed through.
 - A tool that ignores `ToolContext.cancel` cannot be interrupted; the gateway then reports `TIMEOUT` and warns that its worker may still run (its journal entry is already closed).
-- Leases are automatic only for managed worktrees; the runtime does not yet call `recover()`; only `patch.apply`, `repo.write` and `git.commit` write file/commit checkpoints; POSIX orphan cleanup is untested here.
+- Leases are automatic only for managed worktrees; the runtime calls `recover()` at task start but only reports (no `acknowledge()`, no resume decision); only `patch.apply`, `repo.write` and `git.commit` write file/commit checkpoints; POSIX orphan cleanup is untested here.
 - POSIX process-group handling and `prlimit` are implemented but have not been exercised on a POSIX machine.
-- Artifacts are per-workspace, unencrypted files; gc is not scheduled; execution records are not yet forwarded into Role 1's event stream.
-- Role 1's `ToolRegistry` names and policy risk labels are not yet aligned with the capability model.
+- Artifacts are per-workspace, unencrypted files; gc is not scheduled; events carry the record id and key fields, not the record.
+- Role 1's runtime still defaults to its six-tool registry and a `RUN_COMMAND`-only policy; it has no approval flow, so `REQUEST_APPROVAL` ends a task. Change notifications are in-process and unreplayed, and nothing consumes them yet.
 
 See [EXECUTION_PLAN.md](EXECUTION_PLAN.md) for the scheduled work.
 
