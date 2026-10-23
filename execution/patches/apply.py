@@ -62,7 +62,8 @@ def apply_patch(worktree: str, patch: dict) -> dict:
             "status": "ERROR",
             "message": str(exc),
             "category": (
-                "INTERNAL_ERROR" if isinstance(exc, OSError)
+                "PERMISSION_DENIED" if isinstance(exc, PermissionError)
+                else "INTERNAL_ERROR" if isinstance(exc, OSError)
                 else "INVALID_ARGUMENTS"
             ),
         }

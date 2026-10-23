@@ -117,6 +117,9 @@ def _write_atomic(path: Path, data: bytes) -> None:
         tmp.unlink(missing_ok=True)
 
 
+ESTIMATE_MAX_AGE_SECONDS = 30.0
+
+
 def _cap(data: bytes, limit: int) -> tuple[bytes, bool]:
     """Keep the head and the tail of oversized content (failures end with the useful part)."""
 
@@ -138,6 +141,8 @@ class ArtifactStore:
         self._meta = self.root / "meta"
         self._spool = self.root / "spool"
         self._lock = threading.RLock()
+        self._estimate: int | None = None  # bytes stored, as of the last count plus puts since
+        self._scanned_at = 0.0
 
         try:
             for directory in (self._objects, self._meta, self._spool):
@@ -177,6 +182,7 @@ class ArtifactStore:
         retention: Retention = "temporary",
         redact: bool = True,
         original_size: int | None = None,
+        extra_secrets: tuple[str, ...] = (),
     ) -> ArtifactMeta:
         """Store `data` (capped, then redacted when `redact`). Raises ArtifactError."""
 
@@ -186,7 +192,7 @@ class ArtifactStore:
         count, kinds = 0, {}
 
         if redact:
-            result = redact_text(capped.decode("utf-8", errors="replace"))
+            result = redact_text(capped.decode("utf-8", errors="replace"), extra=extra_secrets)
             count, kinds = result.count, result.kinds
 
             if result.changed:
@@ -238,6 +244,7 @@ class ArtifactStore:
         media_type: str = "text/plain",
         retention: Retention = "temporary",
         redact: bool = True,
+        extra_secrets: tuple[str, ...] = (),
     ) -> ArtifactMeta:
         """Store a file's head and tail without loading all of it."""
 
@@ -262,7 +269,7 @@ class ArtifactStore:
         return self.put(
             data, kind=kind, owner=owner, description=description,
             media_type=media_type, retention=retention, redact=redact,
-            original_size=size,
+            original_size=size, extra_secrets=extra_secrets,
         )
 
     # ----------------------------------------------------------------- read
@@ -374,9 +381,29 @@ class ArtifactStore:
         return total
 
     def _make_room(self, incoming: int) -> None:
-        if self.total_bytes() + incoming <= self.policy.max_total_bytes:
+        # Adding up every blob on each put makes storing N artifacts cost O(N^2)
+        # (about 50 ms per artifact at 3000 artifacts). Far from the quota a
+        # running estimate is good enough; near it, or when the estimate has
+        # not been checked against the disk for a while (other processes write
+        # to the same store), count for real.
+        now = time.monotonic()
+        limit = self.policy.max_total_bytes
+
+        if (
+            self._estimate is not None
+            and now - self._scanned_at < ESTIMATE_MAX_AGE_SECONDS
+            and self._estimate + incoming <= limit // 2
+        ):
+            self._estimate += incoming
             return
 
+        total = self.total_bytes()
+        self._estimate, self._scanned_at = total + incoming, now
+
+        if total + incoming <= limit:
+            return
+
+        self._estimate = None
         self.gc(reserve=incoming)
 
         if self.total_bytes() + incoming > self.policy.max_total_bytes:

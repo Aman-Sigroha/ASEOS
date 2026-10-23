@@ -485,6 +485,33 @@ class WorktreeManager:
                     {"worktree_id": record.worktree_id, "action_id": op.action_id},
                 )
 
+    def _finish_interrupted_removal(
+        self, record: WorktreeRecord, assessment: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Git can unregister a worktree and delete its files yet fail on the
+        directory itself (a process still has it as its working directory, an
+        indexer holds a handle). What remains is an empty folder Git no longer
+        knows. Removing an EMPTY folder cannot lose anything, so do that and
+        look again; a folder with anything in it is still refused."""
+
+        path = Path(record.path)
+
+        try:
+            if any(path.iterdir()):
+                return assessment
+
+            path.rmdir()  # fails on a non-empty folder: that is the safety
+        except OSError as exc:
+            raise GitError(
+                "GIT_FAILURE",
+                "The worktree folder is empty and no longer known to Git, but "
+                f"it cannot be removed yet ({exc.strerror or exc}); something is "
+                "probably still using it. Try again after that stops.",
+                {"path": record.path, "retryable": True},
+            ) from exc
+
+        return self.assess(record)
+
     def remove(
         self, worktree_id: str, *, discard_confirmed: bool = False
     ) -> dict[str, Any]:
@@ -499,6 +526,9 @@ class WorktreeManager:
             self._check_recorded_path(record)
             self._refuse_if_in_use(record)
             assessment = self.assess(record)
+
+            if assessment["exists"] and not assessment["registered_in_git"]:
+                assessment = self._finish_interrupted_removal(record, assessment)
 
             if assessment["exists"] and not assessment["registered_in_git"]:
                 raise GitError(

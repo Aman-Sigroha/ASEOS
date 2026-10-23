@@ -445,6 +445,11 @@ class EditTool(Tool):
                 result.get("category", "INTERNAL_ERROR"),
                 result.get("message", "Patch operation failed"),
                 exit_code=1,
+                data=(
+                    {"os_denied": True, "approvable": False}
+                    if result.get("category") == "PERMISSION_DENIED"
+                    else None
+                ),
             )
 
         return ToolOutput(

@@ -1,5 +1,6 @@
 """Structured `git diff` with an explicit comparison base."""
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +87,13 @@ def _parse_numstat(output: str) -> dict[str, tuple[int | None, int | None]]:
     return stats
 
 
+def _inside(workspace: Path, target: Path) -> bool:
+    try:
+        return Path(os.path.realpath(target)).is_relative_to(Path(os.path.realpath(workspace)))
+    except (OSError, ValueError):
+        return False
+
+
 def _untracked_diff(
     workspace: Path, paths: list[str] | None, allow_secrets: bool = False
 ) -> tuple[str, list[dict[str, Any]], list[dict[str, str]]]:
@@ -108,6 +116,13 @@ def _untracked_diff(
             continue
 
         target = workspace / name
+
+        # `ls-files` lists files behind a directory junction or symlink as if
+        # they were part of the repository (Git on Windows follows junctions).
+        # Never read through one: it can lead anywhere on the machine.
+        if not _inside(workspace, target):
+            skipped.append({"path": name, "reason": "resolves outside the workspace; not read"})
+            continue
 
         try:
             size = target.stat().st_size

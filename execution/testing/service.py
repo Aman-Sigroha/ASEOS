@@ -83,7 +83,12 @@ def _summary(report: RunReport) -> str:
 
         detail = ": " + ", ".join(parts)
 
-    return f"{report.status}{detail} ({report.framework}, {scope})"
+    rest = (
+        f"; not run: {', '.join(report.other_frameworks)}"
+        if report.other_frameworks
+        else ""
+    )
+    return f"{report.status}{detail} ({report.framework}, {scope}{rest})"
 
 
 def _collect_reports(
@@ -158,6 +163,7 @@ def run_test_suite(
         report.framework = chosen.framework
 
         if len(detections) > 1:
+            report.other_frameworks = [d.framework for d in detections[1:]]
             report.notes.append(
                 "Also detected: " + ", ".join(d.framework for d in detections[1:])
                 + "; pass framework=... to run those instead."

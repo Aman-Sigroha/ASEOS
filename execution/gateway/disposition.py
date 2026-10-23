@@ -58,6 +58,20 @@ def disposition_of(
     if category == "CANCELLED":
         return verdict(ABORT, "The action was cancelled.")
 
+    if category == "PERMISSION_DENIED" and data.get("policy_refused") and not data.get("approvable"):
+        return verdict(
+            REPLAN,
+            "The command policy does not allow this command and no grant changes that; "
+            "choose a different command.",
+        )
+
+    if category == "PERMISSION_DENIED" and data.get("os_denied"):
+        return verdict(
+            ESCALATE,
+            "The operating system refused access (read-only, locked or no rights). "
+            "No grant of ours changes that; a person must fix it or the plan must avoid this file.",
+        )
+
     if category == "PERMISSION_DENIED":
         return verdict(
             ESCALATE,

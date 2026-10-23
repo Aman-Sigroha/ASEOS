@@ -394,7 +394,12 @@ def apply_plan(plan: PatchPlan, action_id: str = "") -> dict:
                 else "rollback was incomplete."
             )
         )
-        category = exc.category if isinstance(exc, ToolError) else "INTERNAL_ERROR"
+        denied = isinstance(exc, PermissionError)
+        category = (
+            exc.category
+            if isinstance(exc, ToolError)
+            else ("PERMISSION_DENIED" if denied else "INTERNAL_ERROR")
+        )
         raise ToolError(
             category,  # type: ignore[arg-type]
             message,
@@ -402,6 +407,7 @@ def apply_plan(plan: PatchPlan, action_id: str = "") -> dict:
                 "rolled_back": rolled_back,
                 "partial": not rolled_back,
                 "unrestored_files": failed,
+                **({"os_denied": True, "approvable": False} if denied else {}),
             },
         ) from exc
 

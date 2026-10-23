@@ -62,6 +62,9 @@ class RunReport(BaseModel):
     modified_during_run: bool = False
     evidence: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
+    # Frameworks detected in the workspace that this run did NOT cover (auto
+    # mode runs the first one only). A pass says nothing about them.
+    other_frameworks: list[str] = Field(default_factory=list)
     not_run_reason: str | None = None
     not_run_kind: str | None = None  # no_framework | policy | sandbox | start_failed | not_installed
     process: dict[str, Any] = Field(default_factory=dict)

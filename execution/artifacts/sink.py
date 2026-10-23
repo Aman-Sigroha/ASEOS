@@ -46,7 +46,9 @@ class ArtifactSink:
         action_id: str = "",
         tool: str | None = None,
         task_id: str | None = None,
+        extra_secrets: tuple[str, ...] = (),
     ) -> None:
+        self.extra_secrets = extra_secrets
         self.store = store
         self.workspace = workspace
         self.owner = Owner(workspace, task_id, action_id or None, tool)
@@ -81,6 +83,7 @@ class ArtifactSink:
                 self.store.put(
                     data, kind=kind, owner=self.owner, description=description,
                     media_type=media_type, retention=retention, redact=redact,
+                    extra_secrets=self.extra_secrets,
                 )
             )
         except ArtifactError as exc:
@@ -109,6 +112,7 @@ class ArtifactSink:
                 self.store.put_file(
                     path, kind=kind, owner=self.owner, description=description,
                     media_type=media_type, retention=retention, redact=redact,
+                    extra_secrets=self.extra_secrets,
                 )
             )
         except ArtifactError as exc:

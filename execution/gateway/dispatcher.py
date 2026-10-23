@@ -15,7 +15,7 @@ from execution.artifacts.records import (
     now_iso,
     summarize_args,
 )
-from execution.artifacts.redact import redact_text
+from execution.artifacts.redact import explicit_secrets, redact_text
 from execution.artifacts.sink import ArtifactSink, NullSink
 from execution.artifacts.store import (
     ArtifactError,
@@ -378,6 +378,7 @@ class ExecutionGateway:
             action_id=action.id,
             tool=tool_name,
             task_id=self.task_id,
+            extra_secrets=explicit_secrets(action.payload.get("env")),
         )
 
     def add_observer(self, observer: Callable[[dict[str, Any]], None]) -> None:
@@ -491,6 +492,19 @@ class ExecutionGateway:
         except ToolError as error:
             result = self._result(action, tool_name, started, error=error)
 
+        except PermissionError as exc:  # the OS said no (read-only file, locked, ACL)
+            result = self._result(
+                action,
+                tool_name,
+                started,
+                error=ToolError(
+                    "PERMISSION_DENIED",
+                    f"The operating system denied access: {exc.strerror or exc}"
+                    + (f" ({Path(exc.filename).name})" if exc.filename else ""),
+                    data={"os_denied": True, "approvable": False},
+                ),
+            )
+
         except Exception as exc:  # unexpected tool bug: report, never crash
             result = self._result(
                 action,
@@ -506,9 +520,9 @@ class ExecutionGateway:
     # ------------------------------------------------- redaction and records
 
     @staticmethod
-    def _redact_value(value: Any) -> tuple[Any, int]:
+    def _redact_value(value: Any, extra: tuple[str, ...] = ()) -> tuple[Any, int]:
         if isinstance(value, str):
-            redacted = redact_text(value)
+            redacted = redact_text(value, extra=extra)
             return redacted.text, redacted.count
 
         if isinstance(value, dict):
@@ -516,7 +530,7 @@ class ExecutionGateway:
             out = {}
 
             for key, item in value.items():
-                out[key], count = ExecutionGateway._redact_value(item)
+                out[key], count = ExecutionGateway._redact_value(item, extra)
                 total += count
 
             return out, total
@@ -526,7 +540,7 @@ class ExecutionGateway:
             items = []
 
             for item in value:
-                new, count = ExecutionGateway._redact_value(item)
+                new, count = ExecutionGateway._redact_value(item, extra)
                 items.append(new)
                 total += count
 
@@ -546,14 +560,15 @@ class ExecutionGateway:
         write the execution record."""
 
         redactions = sum(ref.redactions for ref in result.artifacts)
+        extra = explicit_secrets(action.payload.get("env"))
 
         if tool is not None and tool.spec.redact_output:
             for field_name in ("stdout", "stderr"):
-                masked = redact_text(getattr(result, field_name))
+                masked = redact_text(getattr(result, field_name), extra=extra)
                 setattr(result, field_name, masked.text)
                 redactions += masked.count
 
-            result.data, count = self._redact_value(result.data)
+            result.data, count = self._redact_value(result.data, extra)
             redactions += count
 
         result.data.update(sink.failure_data())

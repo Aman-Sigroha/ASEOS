@@ -153,6 +153,12 @@ gateway = ExecutionGateway(
 | Search skipped every file when the *workspace itself* lived under an ignored directory name | Ignored-directory test now uses workspace-relative paths |
 | Commands could be started without any isolation even for risky categories | `dev`/`elevated` profiles require a sandbox and fail closed |
 
+## 8b. Findings from the Phase 13 qualification (all fixed, each has a regression test)
+
+- **High:** a directory junction (or symlinked folder) inside the workspace pointing elsewhere made `git.diff` print the contents of files outside the workspace, because untracked files are listed through the link and were read. Untracked files are now read only when their real path is inside the workspace; `workspace_version()` also stops reading through links.
+- **Medium:** a secret passed in a command's `env` argument was masked only if the gateway's own environment held the same value; a command that printed it returned it unmasked in the result and in the stored artifact. Values of secret-named variables passed to a command are now masked everywhere the output goes.
+- **Low:** an OS permission failure (a read-only file) was reported as `INTERNAL_ERROR` and left a temp file in the workspace; a command-policy refusal looked like a request for approval; a failed worktree removal left a folder the tool then refused to clean up. See [EXECUTION_PLAN.md Phase 13](EXECUTION_PLAN.md).
+
 ## 9. Security test map
 
 | Concern | Tests |
@@ -171,3 +177,9 @@ gateway = ExecutionGateway(
 | Cleanup scope, user-work preservation | `test_worktree_manager.py`, `test_git_mutations.py` |
 | Write leases, takeover, recycled pids, orphan termination only on verified identity | `test_recovery_primitives.py`, `test_concurrency_and_crash.py` |
 | Crash at an exact point: patch/write/commit/command, no double application | `test_concurrency_and_crash.py` |
+| Every tool x hostile paths (traversal, absolute, UNC, ADS, devices, junction, `.git`): nothing outside the workspace is read, revealed, created or changed | `test_security_qualification.py` |
+| Payloads cannot grant capabilities, levels, profiles or confirmations | `test_security_qualification.py` |
+| A planted secret reaches no result, artifact, record, journal or lease file | `test_security_qualification.py` |
+| Cross-task writes, forged registry paths, cleanup scope | `test_security_qualification.py`, `test_worktree_manager.py` |
+| OS permission failures, folders in use, damaged state on disk, hostile output | `test_failure_injection.py` |
+| The pinned boundary: an allowed program is not confined without a sandbox | `test_security_qualification.py::test_known_limit_*` |

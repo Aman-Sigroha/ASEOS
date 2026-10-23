@@ -87,15 +87,37 @@ def _env_secrets(env: Mapping[str, str] | None) -> list[str]:
     return sorted(values, key=len, reverse=True)  # longest first
 
 
-def redact_text(text: str, env: Mapping[str, str] | None = None) -> Redaction:
-    """Mask secrets in `text`; report how many and which kinds."""
+def explicit_secrets(env: Mapping[str, object] | None) -> tuple[str, ...]:
+    """Secret-looking values among variables a caller passed to ONE command
+    (they are not in this process's environment, so they would otherwise go
+    unmasked when the command prints them)."""
+
+    if not isinstance(env, Mapping):
+        return ()
+
+    return tuple(
+        value
+        for name, value in env.items()
+        if isinstance(value, str)
+        and SECRET_NAME.search(str(name))
+        and len(value) >= MIN_ENV_SECRET_LENGTH
+    )
+
+
+def redact_text(
+    text: str,
+    env: Mapping[str, str] | None = None,
+    extra: tuple[str, ...] = (),
+) -> Redaction:
+    """Mask secrets in `text`; report how many and which kinds. `extra` are
+    further literal values to mask (see `explicit_secrets`)."""
 
     if not text:
         return Redaction(text)
 
     counts: Counter[str] = Counter()
 
-    for value in _env_secrets(env):
+    for value in sorted({*_env_secrets(env), *extra}, key=len, reverse=True):
         hits = text.count(value)
 
         if hits:

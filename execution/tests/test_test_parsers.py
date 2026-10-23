@@ -559,3 +559,28 @@ def test_git_ignored_files_do_not_change_the_fingerprint(tmp_path):
 
     assert workspace_version(repo)["fingerprint"] == before["fingerprint"]
     assert os.name  # keep the import used on every platform
+
+
+NODE_TAP = (
+    "TAP version 13\n# Subtest: ok\nok 1 - ok\n  ---\n  duration_ms: 1.0\n  ...\n"
+    "# Subtest: bad\nnot ok 2 - bad\n  ---\n  error: |-\n    boom\n  ...\n"
+    "# Subtest: skipme\nok 3 - skipme # SKIP\n"
+    "1..3\n# tests 3\n# suites 0\n# pass 1\n# fail 1\n# cancelled 0\n# skipped 1\n# todo 0\n"
+)
+
+
+def test_node_test_runner_tap_output_is_counted_with_its_cases():
+    counts, cases = console.parse_node(NODE_TAP)
+
+    assert (counts.total, counts.passed, counts.failed, counts.skipped) == (3, 1, 1, 1)
+    assert {(c.name, c.status) for c in cases} == {
+        ("ok", "passed"), ("bad", "failed"), ("skipme", "skipped"),
+    }
+
+
+def test_cancelled_node_tests_are_errors_and_a_lone_ok_line_is_not_a_summary():
+    counts, _ = console.parse_node(NODE_TAP.replace("# cancelled 0", "# cancelled 2"))
+
+    assert counts.errors == 2
+    assert console.parse_node("ok 1 - looks like TAP\n") is None
+    assert console.parse_node("# pass 3\n") is None  # no totals, no failure count

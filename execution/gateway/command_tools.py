@@ -280,6 +280,13 @@ class RunCommandTool(Tool):
                 "PERMISSION_DENIED",
                 f"Command refused by policy: {decision.reason}",
                 data={
+                    "not_started": True,
+                    "policy_refused": True,
+                    # A grant helps only when the refusal is about a capability
+                    # this gateway lacks, not about the command itself.
+                    "approvable": bool(
+                        decision.required_capabilities - context.capabilities
+                    ),
                     "command": argv,
                     "policy": {
                         "rule": decision.rule,

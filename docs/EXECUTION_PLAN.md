@@ -4,13 +4,14 @@ Execution, Git, worktrees, command running, sandboxing and testing.
 
 - **Status snapshot date:** 2026-10-23
 - **Branch audited:** `execution` (HEAD `a91605f`)
-- **Test baseline:** `python -m pytest -q` → 1184 passed, 6 skipped (symlink/POSIX-mode tests and the real-container test skip where unavailable), 0 failed (default `testpaths` now exclude the
+- **Test baseline:** `python -m pytest -q` → 1237 passed, 6 skipped (symlink/POSIX-mode tests and the real-container test skip where unavailable), 0 failed (default `testpaths` now exclude the
   intentionally failing `fixtures/` repo). Before the first slices it was 202 passed + 1 fixture failure.
-- **Progress log:** slices A1–A3, B1–B2, C1–C4 (Phase 2 filesystem) C5–C9 (Phase 3 patches) D1–D3, D9 (Phase 4 Git) D4–D8, D11 (Phase 5 worktrees) E1–E5 (Phase 6 commands) H1–H6 (Phase 7 security) F1–F6 (Phase 8 tests) and F7–F8 (Phase 9 verification) and G1–G3 (Phase 10 artifacts, redaction, records) and G4 (Phase 11 recovery) are done; Phase 12 added the Role 1 wiring and the Role 3 change interface; B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
+- **Progress log:** slices A1–A3, B1–B2, C1–C4 (Phase 2 filesystem) C5–C9 (Phase 3 patches) D1–D3, D9 (Phase 4 Git) D4–D8, D11 (Phase 5 worktrees) E1–E5 (Phase 6 commands) H1–H6 (Phase 7 security) F1–F6 (Phase 8 tests) and F7–F8 (Phase 9 verification) and G1–G3 (Phase 10 artifacts, redaction, records) and G4 (Phase 11 recovery) are done; Phase 12 added the Role 1 wiring and the Role 3 change interface; Phase 13 qualified it (representative repos, failure injection, security sweep, benchmarks); B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
 
 Companion documents: [ARCHITECTURE.md](ARCHITECTURE.md) (how the system fits together),
 [API_CONTRACTS.md](API_CONTRACTS.md) (baseline runtime ↔ execution contract),
 [EXECUTION_CONTRACT.md](EXECUTION_CONTRACT.md) (gateway pipeline, tools, result fields, error categories),
+[EXECUTION_LIMITATIONS.md](EXECUTION_LIMITATIONS.md) (what is and is not guaranteed, what was never run, measured performance),
 [SECURITY_MODEL.md](SECURITY_MODEL.md) (threat model, isolation, limits),
 [CONTRIBUTING.md](CONTRIBUTING.md) (verification commands and safety rules).
 
@@ -69,7 +70,7 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 | 10 | Artifacts, retention & audit | 🟡 PARTIAL | Artifact store, retention/quota, redaction, execution records, evidence consistency checks, `artifact.read`/`list` and store-failure handling done; Role 1 event forwarding, gc scheduler and report/trace artifacts pending |
 | 11 | Concurrency, interruption & recovery | 🟡 PARTIAL | Serialized mutations, write leases, intent journal, crash reconciliation (never re-runs), orphan-process cleanup with identity checks, git-lock handling and removal protection done and tested with real process deaths; automatic resume and Role 1 hook-up pending |
 | 12 | Cross-role integration | 🟡 PARTIAL | Role 1: registry built from the gateway, derived approval set, retry/replan dispositions, execution fields on events, recovery report, cancellation tested. Role 3: change-notification and identity interface tested against a stand-in index. Role 2: contract written, nothing built (no desktop code, no "apply to main checkout"). The runtime's approval flow and resume decisions are Role 1's |
-| 13 | Security, testing & performance qualification | 🟡 PARTIAL | Unit/integration tests only |
+| 13 | Security, testing & performance qualification | 🟡 PARTIAL | Attack-and-measure pass: representative repos (dirty tree, stale patches, failing build, polyglot, awkward files, real Node), every failure-injection item mapped to a test, a cross-tool security sweep with secret-canary scanning, and benchmarks with guard tests. Found and fixed 8 defects (incl. a junction read in `git.diff`, unmasked per-command secrets and a quadratic artifact store). Container sandbox, POSIX, Maven/Gradle/Cargo/Go and network/FS limits remain unproven |
 
 **Role 4 completion checklist: 12 ✅ done · 13 🟡 partial · 1 ⬜ pending (of 26)** (the previous version of this line said 14 partial / 0 pending; counting the list in Section 4 gave 12 / 12 / 2 before Phase 12) (an item flips only when its full acceptance criterion is met). See [Section 4](#4-role-4-completion-checklist).
 
@@ -304,12 +305,23 @@ Built in slices: **12a** Role 1 wiring and **12b** the Role 3 change interface. 
 
 *Completion criterion: correctness, security, recovery and performance criteria are met on representative workloads, not just the happy path.*
 
-- ✅ Unit/integration tests: patching, runner, test runner, git operations, worktrees, executor events, `RealActionExecutor`, plus full Role 1 suites (202 passing).
-- ⬜ Tests against richer fixture repos (dirty tree, conflicting patch, failing build, multiple languages).
-- ⬜ Failure-injection suite (invalid/stale patch, missing executable, timeout, orphan child, permission failure, git lock, cleanup failure, test setup error, corrupted report, artifact-store failure, restart mid-run).
-- ⬜ Security suite (traversal, symlink, blocked commands, network/FS limits, secret leakage, permission bypass, cross-task writes, cleanup scope).
-- ⬜ Performance benchmarks (command overhead, read/patch latency, git status/diff, worktree create/remove, test overhead, memory, concurrency, artifact volume).
-- ⬜ Documented execution limitations (started in `API_CONTRACTS.md`).
+Phase 13 was run as an attack-and-measure pass, not a feature phase. It found **eight real defects**, all fixed with regression tests (listed under each item). Nothing below was claimed before it ran.
+
+- ✅ Unit/integration tests: patching, runner, test runner, git operations, worktrees, executor events, `RealActionExecutor`, plus full Role 1 suites.
+- ✅ **Richer fixture repositories** (`execution/tests/qualification_repos.py`, `test_qualification_repos.py`): a user's dirty tree (unstaged + staged + untracked + ignored work), stale and multi-file conflicting patches, CRLF and no-final-newline files, a project that does not build, failing tests, spaces/unicode/binary/200 000-character-line files, and a repository with Python, Node and Go side by side. A task in a worktree leaves the user's unfinished work byte-for-byte untouched (files, index, HEAD, status); a commit refuses to sweep up the user's staged changes; discard stays inside the named paths.
+  - **Real Node toolchain.** Node 22 is installed here, so the npm adapter was run against the real `node --test`. *Defect:* its TAP output was not understood and every run came back `ERROR: no readable results` (it failed closed, but could never pass). A TAP parser was added; passing, failing and skipped Node tests are now counted with their case names. **Maven, Gradle, Cargo and Go remain unproven against real tools** (not installed).
+  - *Defect:* in a repository with several test frameworks, `test.run` in auto mode ran the first one and reported `PASSED` with only a note about the others. Reports now carry `other_frameworks`, the summary says `not run: npm, go`, and verification evidence includes the list. (It does not turn the pass into a failure: what ran did pass; deciding that the rest matters is the caller's.)
+- ✅ **Failure-injection suite.** Every item of the original list now has a named test (`test_failure_injection.py` pins the table and fails if a referenced test disappears): stale/invalid patch, missing executable, timeout, orphan child, permission failure, git lock, cleanup failure, test setup error, corrupted report, artifact-store failure, restart mid-run. New in this phase, through the gateway: read-only files, a worktree that something is using, a corrupt registry record, a non-repository and a damaged `.git`, output that is not text, a 40 MB flood, and a command that never ends.
+  - *Defect:* a write to a read-only file came back as `INTERNAL_ERROR` and left a read-only `.tmp` file behind in the user's tree. It is now `PERMISSION_DENIED` with `data.os_denied` / `approvable=false` (disposition `ESCALATE`, reason "no grant of ours changes that"), and the temp file is removed.
+  - *Defect:* when a worktree could not be removed because a process was using its folder, Git had already unregistered it and emptied it; the next attempt then refused ("not a Git worktree") and the task was stuck. An **empty** leftover folder is now finished off (nothing can be lost by removing an empty folder); a folder with anything in it is still refused. A removal that fails after discard confirmation still has the work backed up first (tested).
+  - *Defect:* a command refused by the command policy was reported like an approval request. It now carries `policy_refused`, `approvable=false`, disposition `REPLAN`.
+- ✅ **Security suite** (`test_security_qualification.py`): (1) every path-taking tool × 13–18 hostile paths (traversal, absolute, UNC, device names, ADS, NUL, a junction pointing outside, `.git/config`, hooks) — over 300 calls on Windows — must not read, reveal, create or change anything outside the workspace, nor `.git/config`, hooks or tracked files; (2) ten state-changing tools called with thirteen self-granting payload fields on a read-only profile must stay `PERMISSION_DENIED` and change nothing; (3) secret files stay unreadable with any payload; (4) a secret planted in the parent environment, one passed to a single command, and one in `.env` must appear in **no** result, artifact, execution record, journal or lease file (every file under the store, state and `.git/aseos` is scanned); (5) one task cannot write, read, commit to or remove another task's worktree through a tool; (6) a forged registry path cannot aim a removal at another folder, the main checkout or `.git`.
+  - *Defect (high):* with a **directory junction** (or symlinked folder) inside the workspace pointing elsewhere, `git.diff` — which includes untracked files by default — printed the contents of files outside the workspace. Untracked files are now read only if they resolve inside the workspace (`skipped_untracked` says why). `workspace_version()` no longer reads through such links either.
+  - *Defect:* a secret passed in a command's `env` argument was masked only if the same name existed in the gateway's own environment; if the command printed it, it came back **unmasked in the result and in the stored artifact**. Values of secret-named variables passed to a command are now masked in results, `data` and artifacts.
+  - Pinned limit: `test_known_limit_without_a_sandbox_an_allowed_program_runs_as_the_user` shows a program the policy allows *can* write into another task's worktree. That is the documented boundary, not a fix.
+- ✅ **Performance benchmarks** (`python -m execution.bench [--quick] [--json FILE]`; guard tests in `test_performance.py` with generous budgets). Numbers are in [EXECUTION_LIMITATIONS.md](EXECUTION_LIMITATIONS.md#measured-performance). Findings: a gateway command costs about 66 ms more than a bare subprocess; *defect:* the artifact store added up every stored blob on each put, so storing N artifacts was O(N²) (54 ms per artifact at 3000) — now a running estimate re-counted near the quota (6.7 ms); `workspace_version()` costs 1–1.5 ms per file here (2000 files ≈ 2.5 s) and runs before and after every test run and verification — acceptable now, the thing to optimize first (a modification-time cache was rejected because a program could reset mtimes and defeat the integrity check); on this Windows machine the first read of a newly written file costs ~10 ms (antivirus), which makes `artifact.list` on hundreds of just-written artifacts take seconds (it is ~100× faster once warm); output memory is bounded (a 100 MB flood grew memory by tens of MB and returned a 200 KB excerpt); reads and commands run in parallel while file changes are serialized, as designed.
+- ✅ Documented limitations: [EXECUTION_LIMITATIONS.md](EXECUTION_LIMITATIONS.md) (one place for what is not guaranteed, what was never run, and what was measured).
+- 🟡 **Not covered, by design of the environment:** network and filesystem limits for allowed programs (need a sandbox; the Docker client is installed here but its **daemon was not running**, so the container backend is still untested against a real engine); anything on Linux or macOS (process groups, `prlimit`, the Linux creation token, POSIX permission bits, symlink-file tests); Maven/Gradle/Cargo/Go adapters; a repository with hundreds of thousands of files; long soak runs; behaviour under antivirus other than this machine's; concurrency across several machines.
 
 ---
 
@@ -437,7 +449,7 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 - [~] Connect real tools to the Role 1 runtime — wired through the gateway with a gateway-built registry, derived approval set, dispositions, event fields, recovery report and cancellation tested; the runtime's approval flow, resume decisions and default adoption (registry, `ExecutionVerifier`) are Role 1's
 - [ ] Integrate output, diffs and tests with Role 2
 - [~] Coordinate index refreshes and worktrees with Role 3 — change/identity interface built and tested against a stand-in index; no real indexer, not reviewed by Role 3
-- [~] Complete security, failure-injection and performance tests — unit/integration only
+- [~] Complete security, failure-injection and performance tests — security sweep, failure-injection matrix, representative repos and benchmarks done and passing on Windows; real-container, POSIX, network/FS-limit and non-Python/Node toolchain tests cannot be run here, so this stays partial
 
 `[x]` done · `[~]` partial · `[ ]` pending — **12 / 13 / 1** of 26.
 
@@ -460,9 +472,24 @@ The defining end-to-end demonstration, in an isolated worktree, on a real reposi
 11. Security tests demonstrate the boundary holds.
 12. End-to-end tests show a real modification, real verification and safe failure handling.
 
-**Where we are today:** items 1, 3 and 4 work in baseline form (`python -m execution.demo` shows worktree →
-patch → tests → diff → cleanup). Items 2, 5–12 are partial or pending, and cleanup currently destroys the result
-rather than preserving it for review.
+**Where we are today** (after Phase 13), item by item — ✅ demonstrated by a passing test on Windows, 🟡 partly, ⬜ not at all:
+
+| # | Item | State |
+| - | ---- | ----- |
+| 1 | Runtime requests a registered tool with validated arguments | ✅ registry built from the gateway; every tool validates its arguments |
+| 2 | Gateway checks permissions, workspace and resource limits | 🟡 capabilities, levels, workspace confinement, timeouts and output caps are enforced and attacked in tests; CPU/memory/process limits for native programs exist on Windows only; no sandbox has run against a real engine |
+| 3 | The tool operates on the intended repo/worktree | ✅ leases, identity, confinement sweep, cross-task tests |
+| 4 | Normalized, traceable results | ✅ `ExecutionResult` + dispositions + execution records + artifacts |
+| 5 | Tests run under the defined policy | ✅ pytest, unittest and Node (`node --test`) against real tools; 🟡 Maven, Gradle, Cargo, Go never run |
+| 6 | Verification evidence tied to the code version tested | ✅ built and tested; 🟡 Role 1 has not made `ExecutionVerifier` its default |
+| 7 | The desktop can inspect logs, changed files, diffs, test reports | 🟡 every piece is available through the gateway; there is no desktop consumer, no facade, and no way to apply a result to the main checkout |
+| 8 | Repository intelligence refreshes after source changes | 🟡 change events and identity exist and work against a stand-in index; Role 3 has no indexer yet |
+| 9 | Cancellation, timeouts, conflicts, process failures handled safely | ✅ on Windows; ⬜ never run on POSIX |
+| 10 | Interrupted tasks reconcile without repeating mutations | ✅ reported and tested with real process deaths; 🟡 the runtime reports but does not decide to resume |
+| 11 | Security tests demonstrate the boundary holds | 🟡 holds for every tool; **an allowed program is not confined without a sandbox**, and the container sandbox is unproven |
+| 12 | End-to-end tests show a real modification, verification and safe failure handling | ✅ demo and integration tests; 🟡 not driven from a desktop |
+
+Full detail of what is and is not guaranteed: [EXECUTION_LIMITATIONS.md](EXECUTION_LIMITATIONS.md).
 
 ## 6. Cross-role agreements still to finalize
 

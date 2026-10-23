@@ -93,7 +93,9 @@ ASEOS/
 │   ├── notify.py             WorkspaceChange events + repo identity for Role 3 (gateway.add_change_listener)
 │   ├── verification/         checks.py (8 check kinds), service.py (run_checks → evidence), evidence.py,
 │   │                         globs.py, verifier.py (ExecutionVerifier = Role 1 Verifier adapter)
-│   ├── tests/                unit tests for the execution modules (+ empty runner.py placeholder)
+│   ├── bench.py              `python -m execution.bench`: latency, memory, concurrency and artifact-volume benchmarks
+│   ├── tests/                unit and qualification tests (qualification_repos.py = fixture repositories;
+│   │                         test_security_qualification / test_failure_injection / test_performance); empty runner.py placeholder
 │   ├── worktrees/            manager.py (lifecycle), store.py (registry + repo lock), record.py, ids.py
 │   └── demo.py               `python -m execution.demo`
 ├── intelligence/             Role 3 — empty placeholders (context, parser, scanner, search, symbols)
@@ -289,7 +291,7 @@ artifacts, command policy and sandboxing — will be added in slices so the runt
   `tests/agent/test_real_executor_integration.py`.
 - Role 1 suites: `tests/agent`, `decision`, `events`, `llm`, `planner`, `schemas`, `state`, `task`, `tools`,
   `verification`.
-- Baseline at time of writing: **1184 passed, 6 skipped** (symlink-file and POSIX-mode tests skip when the OS does not allow
+- Baseline at time of writing: **1237 passed, 6 skipped** (symlink-file and POSIX-mode tests skip when the OS does not allow
   them; a Windows directory-junction test covers the same escape). `pyproject.toml` `testpaths` limits default collection to `tests/`
   and `execution/tests/`; the deliberately broken `fixtures/repositories/calculator` test (which the demo fixes)
   is not collected.

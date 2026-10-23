@@ -115,6 +115,35 @@ def _words(text: str) -> dict[str, int]:
     return {k: int(v) for v, k in re.findall(r"(\d+) (failed|passed|skipped|todo|pending)", text)}
 
 
+_TAP_SUMMARY = re.compile(r"^# (tests|pass|fail|cancelled|skipped|todo) (\d+)\s*$", re.M)
+_TAP_CASE = re.compile(r"^(not ok|ok) \d+ - (.*?)(?: # (SKIP|TODO)\b.*)?$", re.M)
+
+
+def _parse_tap(text: str) -> Parsed | None:
+    """TAP as printed by `node --test` (top-level results and its `# pass N`
+    summary). Both must be present: a lone `ok` line is not a summary."""
+
+    found = {key: int(value) for key, value in _TAP_SUMMARY.findall(text)}
+
+    if "tests" not in found or "pass" not in found or "fail" not in found:
+        return None
+
+    cases = [
+        CaseResult(
+            name=name.strip(),
+            status="skipped" if directive else ("failed" if verdict == "not ok" else "passed"),
+        )
+        for verdict, name, directive in _TAP_CASE.findall(text)
+    ]
+    skipped = found.get("skipped", 0) + found.get("todo", 0)
+    errors = found.get("cancelled", 0)
+
+    return Counts(
+        total=found["tests"], passed=found["pass"], failed=found["fail"],
+        errors=errors, skipped=skipped,
+    ), cases
+
+
 def parse_node(text: str) -> Parsed | None:
     text = clean(text)
 
@@ -128,6 +157,11 @@ def parse_node(text: str) -> Parsed | None:
             return Counts(
                 total=passed + failed + skipped, passed=passed, failed=failed, skipped=skipped
             ), []
+
+    tap = _parse_tap(text)
+
+    if tap is not None:
+        return tap
 
     passing = re.search(r"^\s*(\d+) passing", text, re.M)
 

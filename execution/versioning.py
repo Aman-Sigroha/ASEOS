@@ -97,6 +97,20 @@ def _walk_files(workspace: Path) -> list[str]:
     return sorted(found)
 
 
+def _dir_is_inside(folder: Path, real_workspace: Path, cache: dict[Path, bool]) -> bool:
+    """Whether `folder` really lives under the workspace (not through a junction or
+    symlink). Checked once per folder: resolving every file costs milliseconds each
+    on Windows."""
+
+    known = cache.get(folder)
+
+    if known is None:
+        known = Path(os.path.realpath(folder)).is_relative_to(real_workspace)
+        cache[folder] = known
+
+    return known
+
+
 def workspace_version(workspace: Path) -> dict[str, Any]:
     """`{kind, head, fingerprint, file_count}` for the workspace's current state."""
 
@@ -106,12 +120,23 @@ def workspace_version(workspace: Path) -> dict[str, Any]:
     names = listed if listed is not None else _walk_files(workspace)
     digest = hashlib.sha256()
     count = 0
+    real_workspace = Path(os.path.realpath(workspace))
+    inside_cache: dict[Path, bool] = {}
 
     for name in names:
         if is_excluded(name):
             continue
 
-        digest.update(f"{name}\0{_hash_entry(workspace / name)}\n".encode("utf-8"))
+        entry = workspace / name
+
+        # A junction/symlinked folder can make files elsewhere on the machine
+        # look like part of the workspace; never read (or depend on) those.
+        if not _dir_is_inside(entry.parent, real_workspace, inside_cache):
+            digest.update(f"{name}\0outside\n".encode("utf-8"))
+            count += 1
+            continue
+
+        digest.update(f"{name}\0{_hash_entry(entry)}\n".encode("utf-8"))
         count += 1
 
     head = None

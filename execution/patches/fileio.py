@@ -42,4 +42,22 @@ def atomic_write_bytes(
 
         os.replace(temp_path, target)
     finally:
+        _discard(temp_path)
+
+
+def _discard(temp_path: Path) -> None:
+    """Remove a leftover temp file. It carries the target's permission bits, so
+    when the target was read-only the temp file is too, and Windows will not
+    delete a read-only file: make it writable first. Best effort: a failure
+    here must not hide the error that got us here."""
+
+    try:
         temp_path.unlink(missing_ok=True)
+    except PermissionError:
+        try:
+            os.chmod(temp_path, stat.S_IWRITE | stat.S_IREAD)
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    except OSError:
+        pass
