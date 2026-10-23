@@ -13,6 +13,8 @@ ActionType = Literal[
     "LIST_DIR",
     "FILE_INFO",
     "WRITE",
+    "VALIDATE_PATCH",
+    "APPLY_PATCH",
 ]
 
 

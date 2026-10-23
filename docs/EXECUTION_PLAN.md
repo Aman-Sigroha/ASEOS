@@ -4,9 +4,9 @@ Execution, Git, worktrees, command running, sandboxing and testing.
 
 - **Status snapshot date:** 2026-10-23
 - **Branch audited:** `execution` (HEAD `a91605f`)
-- **Test baseline:** `python -m pytest -q` → 268 passed, 4 skipped (symlink tests skip where symlinks need privileges), 0 failed (default `testpaths` now exclude the
+- **Test baseline:** `python -m pytest -q` → 330 passed, 5 skipped (symlink/POSIX-mode tests skip where unavailable), 0 failed (default `testpaths` now exclude the
   intentionally failing `fixtures/` repo). Before the first slices it was 202 passed + 1 fixture failure.
-- **Progress log:** slices A1–A3, B1–B2 and C1–C4 (Phase 2 filesystem) are done; B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
+- **Progress log:** slices A1–A3, B1–B2, C1–C4 (Phase 2 filesystem) and C5–C9 (Phase 3 patches) are done; B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
 
 Companion documents: [ARCHITECTURE.md](ARCHITECTURE.md) (how the system fits together),
 [API_CONTRACTS.md](API_CONTRACTS.md) (baseline runtime ↔ execution contract),
@@ -58,7 +58,7 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 | 0 | Audit scaffold & finalize contracts | 🟡 PARTIAL | Audit, mock adapter, result/error contract + `EXECUTION_CONTRACT.md` done; worktree/security docs, fixtures missing |
 | 1 | Execution gateway & tool adapters | 🟡 PARTIAL | `ExecutionGateway` + 6 typed tools, capabilities, error taxonomy done; events, cancellation, registry alignment pending |
 | 2 | Safe filesystem tools | 🟡 PARTIAL | Bounded reads, line ranges, list/info, hash-checked atomic writes, symlink policy done; change notifications (Role 3) pending |
-| 3 | Patch validation & application | 🟡 PARTIAL | Single-file exact-text replace; no unified diff, multi-file, recovery |
+| 3 | Patch validation & application | 🟡 PARTIAL | Unified-diff validate/apply (create/modify/delete, multi-file, base hashes, rollback, reverse) done; persisted recovery artifacts + task-level provenance pending |
 | 4 | Git status, diff & operations | 🟡 PARTIAL | Basic status + unstaged diff; no staged/base/stats/mutations |
 | 5 | Worktrees & task isolation | 🟡 PARTIAL | Create/remove works; no metadata, locking, recovery, safe cleanup |
 | 6 | Controlled command execution | 🟡 PARTIAL | `run_command` with list args + timeout; no env policy, caps, tree-kill, cancel |
@@ -70,7 +70,7 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 | 12 | Cross-role integration | 🟡 PARTIAL | Role 1 wired in; Role 2 and Role 3 pending |
 | 13 | Security, testing & performance qualification | 🟡 PARTIAL | Unit/integration tests only |
 
-**Role 4 completion checklist: 2 ✅ done · 12 🟡 partial · 12 ⬜ pending (of 26)** (an item flips only when its full acceptance criterion is met). See [Section 4](#4-role-4-completion-checklist).
+**Role 4 completion checklist: 3 ✅ done · 12 🟡 partial · 11 ⬜ pending (of 26)** (an item flips only when its full acceptance criterion is met). See [Section 4](#4-role-4-completion-checklist).
 
 ---
 
@@ -136,15 +136,15 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 - ✅ Exact-text replace patch `{file, old, new}` (`execution/patches/apply.py`).
 - ✅ Path containment check, file-exists check, empty-target rejection, not-found and ambiguous (multiple-occurrence) rejection; failures carry an error `category` (`PATCH_CONFLICT`, `PERMISSION_DENIED`, …).
 - ✅ Tests in `execution/tests/test_patch.py`.
-- ⬜ Canonical patch format (unified diff and/or structured edit operations) with a schema and parser.
-- ⬜ New-file, delete-file (policy-gated) and multi-file patches.
-- ⬜ Base/content-hash validation; refuse to overwrite newer content.
-- ⬜ Sensitive-path restrictions; patch size and affected-file limits.
-- ⬜ Controlled application with recovery artifact / rollback; honest reporting of partial application.
-- ⬜ Result built from the *actual* resulting files/Git diff (currently only returns a message).
-- ⬜ Patch provenance: link patch → action id → task → workspace.
-- ⬜ Conflict details preserved for Role 1 replanning.
-- 🟡 Encoding/newlines — uses default `read_text()`/`write_text()` (platform encoding and newline translation); make explicit UTF-8 and preserve line endings.
+- ✅ Canonical patch format: unified diff (plain `diff -u` and `git diff`), parsed by `execution/patches/unified.py`. Rejects renames/copies, mode changes, binary patches, quoted paths with a clear error. The legacy `{file, old, new}` replace remains as `patch.replace` (`EDIT`).
+- ✅ New-file, delete-file and multi-file patches. Deletion needs the `fs.delete` capability, which is **not** granted by default.
+- ✅ Optional per-file `base` sha256 map; mismatch → `PATCH_CONFLICT` with expected/actual hashes. Files are re-compared immediately before writing (and just before each replace), so a file that changed after validation is not overwritten.
+- ✅ Protected paths (`.git/**`, `.env`, `.env.*` except `.example/.sample/.template`; symlinks refused) enforced by a shared `ensure_writable_path` also used by `repo.write` and `patch.replace`. Limits: 200 KB patch, 20 files, 10 MB per file.
+- 🟡 All files are validated in memory first; writes are atomic per file; if a later step fails earlier files are restored (best-effort). `data.rolled_back` / `data.partial` / `data.unrestored_files` say exactly what happened, and the result's `applied_diff` can be fed back with `reverse=true` to undo a patch. Not done: persisted recovery artifacts (Phase 10) and true multi-file atomicity.
+- ✅ Result is built from disk after writing: per-file action, sha256 before/after, additions/deletions, hunk offsets and an `applied_diff` regenerated from the real before/after bytes (≤1 MB, `applied_diff_truncated`). Post-write verification re-reads every file.
+- 🟡 Result carries `patch_id` (sha256 of the patch text) and the originating `action_id`. Linking to a task id and persisting the record needs the event/artifact work (Phase 10) and a task id in the gateway context.
+- ✅ Conflicts report the path, hunk number, expected vs found lines, ambiguous candidate line numbers, or expected/actual hashes in `data`.
+- ✅ Patch engine: explicit UTF-8, CRLF/LF preserved (added lines use the file's dominant line ending), missing-final-newline handled, file permission bits preserved on POSIX. 🟡 The legacy `apply_patch` text replace (`patch.replace`, used by `execute_task`) still uses platform default encoding.
 
 ### Phase 4 — Git status, diff and repository operations 🟡 PARTIAL
 
@@ -306,7 +306,7 @@ Fix these as early slices; they are small and risk-reducing.
 | 3 | `run_command` accepts any `cwd` and inherits the full environment | `execution/commands/runner.py` | No workspace enforcement; secrets leak into child processes |
 | 4 | Timeout kills only the direct child; output is unbounded | `execution/commands/runner.py` | Orphaned grandchildren; memory blow-up on noisy commands |
 | 5 | `CommandVerifier` uses `create_subprocess_shell` with string commands | `runtime/verification/command.py` | Shell injection surface; bypasses execution boundary (Role 1 owns, needs coordination) |
-| 6 | `apply_patch` uses default text encoding / newline handling | `execution/patches/apply.py` | Can corrupt CRLF files or non-UTF-8 platform defaults on Windows |
+| 6 | `apply_patch` (legacy replace used by `execute_task` and `patch.replace`) uses default text encoding / newline handling; the new unified-diff engine does not have this problem | `execution/patches/apply.py` | Can corrupt CRLF files or non-UTF-8 platform defaults on Windows |
 | 7 | ~~`READ` has no size limit~~ **Fixed (slice C1)**; `SEARCH` still skips undecodable files silently and does not report skipped counts | `execution/gateway/fs_tools.py` | Silent partial search results |
 | 8 | `git_diff`/`git_status` use `check=True` and raise (gateway path categorizes; the helpers do not) | `execution/git/operations.py` | Non-repo or git failure surfaces as exceptions, not a categorized result |
 | 9 | Empty placeholder modules: `execution/git/status.py`, `execution/git/diff.py`, `execution/tests/runner.py`, `execution/worktrees/__init__.py`, `execution/patches/__init__.py` | `execution/` | Two layouts (`git/`, `worktrees/`, `testing/`, `tests/`) cause confusion; pick one |
@@ -337,7 +337,9 @@ sandbox → tests → verification → recovery/artifacts → integration/securi
 - ✅ C1. Read limits (size, line range, binary detect) → ✅ C2. list/metadata/exists → ✅ C3. symlink policy tests.
 - ✅ C4. Safe write tool with expected-hash conflict check. (Not restricted to worktrees: it works in whatever workspace the gateway is bound to.)
 - ⬜ C4b. Notify Role 3 of changed files (needs the Role 3 interface); register `LIST_DIR`/`FILE_INFO`/`WRITE` in Role 1's `ToolRegistry` (needs Role 1 decision).
-- C5. Patch schema + parser (unified diff) → C6. validate-only → C7. apply single file with recovery artifact → C8. multi-file/create/delete → C9. provenance.
+- ✅ C5. Unified-diff parser (+ reverse) → ✅ C6. validate-only (`patch.validate`) → ✅ C7. apply with rollback and actual-diff reporting (`patch.apply`) → ✅ C8. multi-file/create/delete (`fs.delete` gated) → 🟡 C9. provenance (`patch_id` + `action_id`; persistence pending).
+- ⬜ C10. Migrate `execute_task` and the legacy replace onto the unified engine, then retire `apply_patch`.
+- ⬜ C11. Register `VALIDATE_PATCH` / `APPLY_PATCH` (and the Phase 2 types) in Role 1's `ToolRegistry`.
 
 **Slice group D — Git & worktrees**
 - D1. Consolidate git status/diff modules; error mapping. D2. Staged/untracked/rename/stat/base-explicit diff. D3. Repo identity.
@@ -370,8 +372,8 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 **B. Files and patches**
 - [x] Implement secure filesystem read operations — bounded READ with line ranges, list, file info, SEARCH, symlink policy
 - [~] Implement validated filesystem writes and conflict detection — done in the gateway; change notification to Role 3 pending
-- [~] Implement patch validation and controlled application — single-file text replace
-- [ ] Preserve patch provenance and failure evidence
+- [x] Implement patch validation and controlled application — unified-diff validate/apply, multi-file, base hashes, rollback, reverse
+- [~] Preserve patch provenance and failure evidence — `patch_id`/`action_id`/conflict details in results; nothing persisted yet
 
 **C. Git and isolation**
 - [~] Implement Git status and diff — basic status, unstaged diff
@@ -402,7 +404,7 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 - [ ] Coordinate index refreshes and worktrees with Role 3
 - [~] Complete security, failure-injection and performance tests — unit/integration only
 
-`[x]` done · `[~]` partial · `[ ]` pending — **2 / 12 / 12** of 26.
+`[x]` done · `[~]` partial · `[ ]` pending — **3 / 12 / 11** of 26.
 
 ---
 

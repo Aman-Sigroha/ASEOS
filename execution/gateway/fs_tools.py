@@ -11,8 +11,6 @@ Symlink policy (enforced here and tested):
 """
 
 import hashlib
-import os
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,9 +29,11 @@ from execution.gateway.tool import (
     ToolError,
     ToolOutput,
     ToolSpec,
+    ensure_writable_path,
     resolve_in_workspace,
 )
 from execution.patches.apply import apply_patch
+from execution.patches.fileio import atomic_write_bytes
 
 SEARCH_IGNORED_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules"}
 SEARCH_MAX_MATCHES = 100
@@ -90,15 +90,6 @@ def _load_text_file(file_path: Path) -> tuple[bytes, str]:
         raise ToolError(
             "INVALID_ARGUMENTS", "File is not valid UTF-8 text"
         ) from exc
-
-
-def _deny_git_internals(workspace: Path, target: Path) -> None:
-    relative = target.relative_to(workspace)
-
-    if ".git" in relative.parts:
-        raise ToolError(
-            "PERMISSION_DENIED", "Writing inside .git is not permitted"
-        )
 
 
 # ----------------------------------------------------------------- READ
@@ -394,7 +385,7 @@ class EditArgs(_Args):
 
 class EditTool(Tool):
     spec = ToolSpec(
-        name="patch.apply",
+        name="patch.replace",
         action_type="EDIT",
         description="Replace a unique text span in one workspace file.",
         args_model=EditArgs,
@@ -405,7 +396,7 @@ class EditTool(Tool):
 
     def run(self, context: ToolContext, args: EditArgs) -> ToolOutput:
         target = resolve_in_workspace(context.workspace, args.file)
-        _deny_git_internals(context.workspace, target)
+        ensure_writable_path(context.workspace, target)
 
         result = apply_patch(
             str(context.workspace),
@@ -475,7 +466,7 @@ class WriteTool(Tool):
             )
 
         target = resolve_in_workspace(workspace, args.path)
-        _deny_git_internals(workspace, target)
+        ensure_writable_path(workspace, target)
 
         if target == workspace:
             raise ToolError("INVALID_ARGUMENTS", "Path must name a file")
@@ -559,17 +550,7 @@ class WriteTool(Tool):
     def _atomic_write(
         self, target: Path, payload: bytes, previous_sha: str | None
     ) -> None:
-        fd, temp_name = tempfile.mkstemp(
-            dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
-        )
-        temp_path = Path(temp_name)
-
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-
+        def unchanged() -> None:
             # Re-check right before replacing to narrow the race window.
             if self._current_sha(target) != previous_sha:
                 raise ToolError(
@@ -577,6 +558,4 @@ class WriteTool(Tool):
                     "File changed while the write was being prepared.",
                 )
 
-            os.replace(temp_path, target)
-        finally:
-            temp_path.unlink(missing_ok=True)
+        atomic_write_bytes(target, payload, unchanged)

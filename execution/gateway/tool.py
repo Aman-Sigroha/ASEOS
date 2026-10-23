@@ -14,6 +14,8 @@ class ToolContext:
     """Trusted context supplied by the gateway, never by the model."""
 
     workspace: Path
+    action_id: str = ""
+    capabilities: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -85,3 +87,30 @@ def resolve_in_workspace(workspace: Path, relative_path: str) -> Path:
         )
 
     return candidate
+
+
+_ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template")
+
+
+def ensure_writable_path(workspace: Path, target: Path) -> None:
+    """Deny writes to Git internals and secret-bearing env files.
+
+    `target` must already be resolved and inside `workspace`.
+    """
+
+    relative = target.relative_to(workspace)
+
+    if ".git" in relative.parts:
+        raise ToolError(
+            "PERMISSION_DENIED", "Writing inside .git is not permitted"
+        )
+
+    name = relative.name
+
+    if name == ".env" or (
+        name.startswith(".env.") and not name.endswith(_ENV_TEMPLATE_SUFFIXES)
+    ):
+        raise ToolError(
+            "PERMISSION_DENIED",
+            f"Writing to protected file '{name}' is not permitted",
+        )

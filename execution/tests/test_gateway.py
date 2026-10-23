@@ -79,7 +79,9 @@ def test_default_tools_declare_canonical_names_and_read_only_flags():
 
     assert specs["READ"].name == "repo.read"
     assert specs["SEARCH"].name == "repo.search"
-    assert specs["EDIT"].name == "patch.apply"
+    assert specs["EDIT"].name == "patch.replace"
+    assert specs["APPLY_PATCH"].name == "patch.apply"
+    assert specs["VALIDATE_PATCH"].name == "patch.validate"
     assert specs["RUN_TEST"].name == "test.run"
     assert specs["GIT_DIFF"].name == "git.diff"
     assert specs["LIST_DIR"].name == "repo.list_dir"

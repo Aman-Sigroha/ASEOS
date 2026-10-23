@@ -71,7 +71,7 @@ class ExecutionGateway:
 
             self._check_capabilities(tool)
             args = self._validate_args(tool, action.payload)
-            output = await self._run(tool, args)
+            output = await self._run(tool, args, action)
             return self._result(action, tool_name, started, output=output)
 
         except ToolError as error:
@@ -112,8 +112,12 @@ class ExecutionGateway:
                 f"Invalid arguments for '{tool.spec.name}': {details}",
             ) from exc
 
-    async def _run(self, tool: Tool, args) -> ToolOutput:
-        context = ToolContext(workspace=self.workspace)
+    async def _run(self, tool: Tool, args, action: Action) -> ToolOutput:
+        context = ToolContext(
+            workspace=self.workspace,
+            action_id=action.id,
+            capabilities=self.granted_capabilities,
+        )
 
         try:
             return await asyncio.wait_for(

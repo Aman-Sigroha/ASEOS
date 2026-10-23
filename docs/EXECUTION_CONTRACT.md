@@ -25,7 +25,9 @@ The workspace is trusted gateway context (`ToolContext`); it is never taken from
 | `repo.list_dir` | `LIST_DIR` | `fs.read` | yes | `{path='.', max_entries≤1000}`; non-recursive; hides links that escape the workspace |
 | `repo.file_info` | `FILE_INFO` | `fs.read` | yes | `{path}`; missing path → success with `exists=false`; type, size, mtime, sha256, binary |
 | `repo.search` | `SEARCH` | `fs.read` | yes | ≤100 matches; sets `truncated` |
-| `patch.apply` | `EDIT` | `fs.write` | no | `{file, old, new}`; unique-match replace; `data.changed_files`, `data.sha256`; `.git` denied |
+| `patch.replace` | `EDIT` | `fs.write` | no | Legacy `{file, old, new}` unique-match replace; `data.changed_files`, `data.sha256`; protected paths denied |
+| `patch.validate` | `VALIDATE_PATCH` | `fs.read` | yes | `{patch, base?, reverse?}`; checks a unified diff against the workspace, writes nothing; see §2.2 |
+| `patch.apply` | `APPLY_PATCH` | `fs.write` (+ `fs.delete` to delete files) | no | `{patch, base?, reverse?}`; see §2.2 |
 | `repo.write` | `WRITE` | `fs.write` | no | `{path, content, expected_sha256?}`; see §2.1 |
 | `test.run` | `RUN_TEST` | `test.run` | no | `python -m pytest` |
 | `git.diff` | `GIT_DIFF` | `git.read` | yes | unstaged diff |
@@ -44,7 +46,19 @@ canonical id. Aligning Role 1's registry names is an open item.
 - **`repo.write`:** a new file must omit `expected_sha256`; overwriting requires `expected_sha256` equal to the current hash. Missing hash on an existing file → `INVALID_ARGUMENTS`; mismatch, or a hash for a missing file → `PATCH_CONFLICT` (with `expected_sha256`/`actual_sha256` in `data`). The write is atomic and verified by re-reading. Paths under `.git` are denied (also for `patch.apply`).
 - **Not covered:** an OS-level race between the final hash re-check and `os.replace`; no file locking.
 
-Default granted capabilities: `fs.read`, `fs.write`, `git.read`, `test.run`.
+### 2.2 Patch semantics (`patch.validate`, `patch.apply`)
+
+- **Format:** unified diff, plain or `git diff` style, modified/created (`--- /dev/null`)/deleted (`+++ /dev/null`) text files, several files per patch, `\ No newline at end of file`. A surrounding markdown code fence is tolerated. Renames, copies, mode changes, binary patches and quoted paths are rejected (`INVALID_ARGUMENTS`).
+- **Matching:** each hunk must match the file exactly (whitespace-sensitive, line endings ignored). The stated line number is tried first; otherwise a single unique match later in the file is used (reported in `hunk_offsets`). No match, or several matches → `PATCH_CONFLICT` with details; there is no fuzzy matching.
+- **Validation first:** every file is checked in memory before any write: path containment, protected paths (`.git/**`, `.env`, `.env.*` except `.example/.sample/.template`), symlinks, size limits (200 KB patch, 20 files, 10 MB per file), `base` hashes, create-vs-exists, delete coverage.
+- **`base`:** optional `{path: sha256}`. A mismatch (or a hash for a missing file) → `PATCH_CONFLICT`.
+- **Deleting** a file requires the `fs.delete` capability, which is not granted by default (`PERMISSION_DENIED` otherwise). The delete hunks must cover the entire file.
+- **Apply:** files are re-compared with what was validated, then written atomically one by one. If a step fails, files already written are restored and created files/directories removed. `data.rolled_back=true` means everything was undone; `data.partial=true` with `data.unrestored_files` means rollback itself failed. This is a best-effort rollback, not a transaction.
+- **Result (from disk, not from the patch):** `files[]` (`action` created/modified/deleted, `sha256_before`, `sha256_after`, `additions`, `deletions`, `hunk_offsets`), `changed_files`, `applied_diff` (regenerated from the real before/after bytes; ≤1 MB, `applied_diff_truncated`), `patch_id` (sha256 of the patch text), `action_id`, `reverse`.
+- **Undo:** pass the previous `applied_diff` with `reverse=true`. Reversing a create is a delete and so needs `fs.delete`.
+- **Encoding/line endings:** UTF-8; added lines use the file's dominant line ending; permission bits of existing files are preserved on POSIX.
+
+Default granted capabilities: `fs.read`, `fs.write`, `git.read`, `test.run`. Not granted by default: `fs.delete`, `shell.run`.
 
 ## 3. `ExecutionResult`
 
@@ -70,13 +84,13 @@ are unaffected.
 | -------- | --------- |
 | `INVALID_ARGUMENTS` | Payload fails schema; missing file; binary/undecodable file; empty patch target; overwrite without `expected_sha256` |
 | `UNKNOWN_TOOL` | No tool registered for the action type |
-| `PERMISSION_DENIED` | Capability not granted; path escapes the workspace |
+| `PERMISSION_DENIED` | Capability not granted (incl. `fs.delete`); path escapes the workspace; protected path or symlink |
 | `WORKSPACE_UNAVAILABLE` | Reserved (workspace is validated at gateway construction) |
 | `RESOURCE_LIMIT` | File too large to read, write content too large |
 | `TIMEOUT` | Gateway or command timeout |
 | `CANCELLED` | Reserved (cancellation not yet implemented) |
 | `PROCESS_FAILURE` | Command could not start or errored |
-| `PATCH_CONFLICT` | Patch target missing or ambiguous; `repo.write` hash mismatch |
+| `PATCH_CONFLICT` | Patch target missing/ambiguous/changed; hunk context mismatch; base hash mismatch; `repo.write` hash mismatch |
 | `GIT_FAILURE` | Git command failed |
 | `TEST_FAILURE` | Test command ran and tests failed |
 | `INTERNAL_ERROR` | Unexpected exception in a tool |
@@ -100,5 +114,5 @@ See [EXECUTION_PLAN.md](EXECUTION_PLAN.md) for the scheduled work.
 4. Add gateway-level tests for success, invalid arguments, denied capability and each error category.
 
 `ActionType` in `runtime/schemas/action.py` gates which action types exist; new ones need a (backward-compatible) schema
-change. `LIST_DIR`, `FILE_INFO` and `WRITE` were added that way. They are **not yet** in Role 1's `ToolRegistry.default()`,
+change. `LIST_DIR`, `FILE_INFO`, `WRITE`, `VALIDATE_PATCH` and `APPLY_PATCH` were added that way. They are **not yet** in Role 1's `ToolRegistry.default()`,
 so the planner cannot offer them until Role 1 registers them.

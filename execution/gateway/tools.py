@@ -15,6 +15,7 @@ from execution.gateway.fs_tools import (
     SearchTool,
     WriteTool,
 )
+from execution.gateway.patch_tools import PatchApplyTool, PatchValidateTool
 from execution.gateway.tool import (
     Tool,
     ToolContext,
@@ -126,6 +127,8 @@ def default_tools() -> list[Tool]:
         SearchTool(),
         EditTool(),
         WriteTool(),
+        PatchValidateTool(),
+        PatchApplyTool(),
         RunTestTool(),
         GitDiffTool(),
         RunCommandTool(),

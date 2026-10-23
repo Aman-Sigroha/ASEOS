@@ -71,8 +71,10 @@ ASEOS/
 ├── execution/                Role 4 — side effects
 │   ├── executor.py           execute_task(): worktree → patch → tests → diff → cleanup (+ events)
 │   ├── gateway/              ExecutionGateway (dispatcher), Tool/ToolSpec protocol, capabilities,
-│   │                         fs_tools.py (read/list/info/search/edit/write), tools.py (test, git diff, shell.run)
-│   ├── patches/apply.py      exact-text patch application, path-contained
+│   │                         fs_tools.py (read/list/info/search/replace/write), patch_tools.py (patch.validate/apply),
+│   │                         tools.py (test, git diff, shell.run, default_tools)
+│   ├── patches/              unified.py (diff parser), engine.py (plan/validate/apply/rollback/report),
+│   │                         fileio.py (atomic write), apply.py (legacy exact-text replace used by execute_task)
 │   ├── git/                  operations.py (status, diff), worktree.py (create/remove);
 │   │                         status.py / diff.py are empty placeholders
 │   ├── commands/runner.py    run_command(argv, cwd, timeout)
@@ -94,8 +96,8 @@ ASEOS/
 
 - **Schemas** (`runtime/schemas/`): `Action` (`id`, `type`, `payload`), `ExecutionResult`, `Plan`, `Task`,
   `RepositoryContext`, `TestRunResult`, `TaskResult`.
-- **Action types:** `SEARCH`, `READ`, `EDIT`, `RUN_TEST`, `RUN_COMMAND`, `GIT_DIFF`, plus `LIST_DIR`, `FILE_INFO`, `WRITE`
-  (the latter three are implemented by the gateway but not yet in `ToolRegistry.default()`).
+- **Action types:** `SEARCH`, `READ`, `EDIT`, `RUN_TEST`, `RUN_COMMAND`, `GIT_DIFF`, plus `LIST_DIR`, `FILE_INFO`, `WRITE`,
+  `VALIDATE_PATCH`, `APPLY_PATCH` (the latter five are implemented by the gateway but not yet in `ToolRegistry.default()`).
 - **Planning:** `Planner` produces a `Plan` of steps; `ActionGenerator` maps each step to an `Action`.
 - **Decisions:** a `DecisionEngine` (deterministic or LLM-backed, routed by `runtime/llm/router.py`) proposes the
   next `Decision`; `DecisionValidator` checks it structurally; `DecisionPolicy` returns `ALLOW` or
@@ -134,7 +136,9 @@ Two implementations exist:
 | `FILE_INFO` (`repo.file_info`) | Exists/type/size/mtime/sha256/binary | Containment |
 | `WRITE` (`repo.write`) | Create a file, or overwrite only when `expected_sha256` matches; atomic + verified | Containment; no write through symlinks; `.git` denied; ≤1 MB |
 | `SEARCH` (`repo.search`) | Case-insensitive text search; ≤100 matches; skips `.git`, `.venv`, `venv`, `__pycache__`, `node_modules` | Same containment; undecodable files skipped |
-| `EDIT` (`patch.apply`) | `apply_patch(workspace, payload)` with `{file, old, new}` | Path containment; target must be non-empty and match exactly once |
+| `EDIT` (`patch.replace`) | Legacy `apply_patch(workspace, payload)` with `{file, old, new}` | Path containment; target must be non-empty and match exactly once; protected paths denied |
+| `VALIDATE_PATCH` (`patch.validate`) | Checks a unified diff against the workspace; writes nothing | Containment, protected paths, size limits, base hashes, hunk context |
+| `APPLY_PATCH` (`patch.apply`) | Applies a unified diff (create/modify/delete, multi-file); validates all files first, atomic per file, rolls back on failure, reports the diff actually produced; `reverse=true` undoes one | As above; deleting needs the `fs.delete` capability (not granted by default) |
 | `RUN_TEST` (`test.run`) | `run_tests(workspace)` → `python -m pytest`, 30 s | Fixed command, no caller-supplied argv |
 | `GIT_DIFF` (`git.diff`) | `git diff --` via the command runner, 10 s | Fixed argv |
 | `RUN_COMMAND` (`shell.run`) | **Denied** — capability `shell.run` is never granted by default | Disabled until a command policy exists |
@@ -252,8 +256,8 @@ artifacts, command policy and sandboxing — will be added in slices so the runt
   `tests/agent/test_real_executor_integration.py`.
 - Role 1 suites: `tests/agent`, `decision`, `events`, `llm`, `planner`, `schemas`, `state`, `task`, `tools`,
   `verification`.
-- Baseline at time of writing: **268 passed, 4 skipped** (symlink-file tests skip when the OS does not allow
-  creating symlinks; a Windows directory-junction test covers the same escape). `pyproject.toml` `testpaths` limits default collection to `tests/`
+- Baseline at time of writing: **330 passed, 5 skipped** (symlink-file and POSIX-mode tests skip when the OS does not allow
+  them; a Windows directory-junction test covers the same escape). `pyproject.toml` `testpaths` limits default collection to `tests/`
   and `execution/tests/`; the deliberately broken `fixtures/repositories/calculator` test (which the demo fixes)
   is not collected.
 - Async tests use `pytest-asyncio` in strict mode; `pythonpath = ["."]`.
