@@ -118,6 +118,29 @@ canonical id. Aligning Role 1's registry names is an open item.
 - **Evidence order:** structured report → console summary → exit code. Exit code alone is never PASSED. A JUnit file is never reused across runs (pytest gets a unique file; Maven/Gradle reports older than the run are ignored). DOCTYPE/ENTITY in a report is refused.
 - **Commands are checked by the command policy** before they run (defense in depth), and run inside the sandbox when the gateway has one.
 
+### 2.8 Verification semantics (`execution/verification`)
+
+Verification is a layer *above* the gateway, not a tool: it runs typed checks by calling gateway tools and records what each call showed.
+
+- **One verdict.** Role 1's `VerificationStatus` (`PASS`/`FAIL`/`ERROR`/`TIMEOUT`) is the only status the runtime acts on. `ExecutionVerifier` (an implementation of Role 1's `Verifier`) returns a `VerificationResult`; `ExecutionResult.success` and `TestRunResult` are inputs to a check, never the final answer. Overall status = TIMEOUT > ERROR > FAIL > PASS; **no checks is an ERROR**, never a PASS. `FAIL` means the check was evaluated and the condition is not met; `ERROR` means it could not be established (permission/policy refusal, tool not installed, unreadable or incomplete evidence, an internal bug).
+- **Check kinds** (`parse_checks` validates plain dicts; unknown fields and kinds are refused):
+
+| `kind` | Established by | PASS when |
+| ------ | -------------- | --------- |
+| `tests` | `test.run` | `data.status == PASSED` (FAILED / ERROR / NO_TESTS → FAIL; TIMEOUT → TIMEOUT; UNVERIFIED / CANCELLED / NOT_RUN → ERROR). `require_full_run` forbids targets |
+| `build`, `lint`, `typecheck` | `shell.run` (needs `shell.run`) | exit 0 **and** the command policy classified the command as the same category; a different category or a missing module is an ERROR |
+| `file_exists` | `repo.file_info` | the path exists with the expected type (or is absent when `must_exist=false`) |
+| `file_content` | `repo.file_info` + `repo.read` | all `contains` found, no `not_contains` found, `sha256` equal. CRLF is normalised. Restricted/secret, binary and oversized files are ERRORs; secrets are never read |
+| `diff_contains` | `git.diff` (`mode=base`, default base `HEAD`, untracked included) | every `added_contains` / `removed_contains` line is in the diff and at least `min_files_changed` files changed. If lines are missing but the diff was truncated or files were skipped, the result is ERROR, not FAIL |
+| `no_prohibited_paths` | `git.status` (+ `git.diff` when `base` is given) | no changed path matches `prohibited` (case-insensitive) and, with `allowed_only`, all are inside it (case-sensitive). Too many changes to list → ERROR. Git-ignored files are invisible to this check |
+
+- **Globs** (`execution/verification/globs.py`): `*` within a segment, `**` across segments, `?`; a pattern without `/` matches at any depth; a trailing `/` means the whole directory; no absolute paths or `..`; at most three `**`. No regular expressions are accepted anywhere in a check.
+- **Evidence** (`VerificationReport` → `CheckEvidence`): per check `kind`, `name`, `status`, `message` (first failing cases / output excerpt), `observed` facts, `traces` (each gateway call: tool, unique `action_id` = `verify-<run>-<check>-<n>`, success, exit code, error category, truncation, artifact refs, output excerpts), `next_steps`, and for program-running checks `workspace_version` and `modified_workspace`. Run level: `version_before`, `version_after`, `stable`, `skipped` (with `fail_fast`).
+- **Next steps** use a fixed vocabulary: `inspect`, `retrieve_output`, `retest_targeted`, `modify_patch`, `replan`, `stop`. A check blocked by permission, policy, invalid arguments or a missing tool lists only `replan`, `stop`.
+- **Freshness.** The workspace is fingerprinted (`workspace_version`) before the run, after every `tests`/`build`/`lint`/`typecheck` check and at the end. With `require_stable` (default) a run whose checks all passed but whose workspace changed in between is reported as `ERROR`. `report_is_current(workspace, report)` says whether a stored report still matches the tree.
+- **Binding.** `ExecutionVerifier` refuses (ERROR) when the task's `workspace_path` is not the gateway's workspace, so it can never verify a different tree than the one changed.
+- **Role 1 schema.** `VerificationCheck` gained optional `kind` and `evidence`, `VerificationResult` an optional `evidence` (run id, version before/after, `stable`, `next_steps`, `skipped`). Existing producers are unaffected. Messages are capped at 2000 characters.
+
 Default granted capabilities: `fs.read`, `fs.write`, `git.read`, `test.run`. Not granted by default: `fs.delete`, `fs.read_secrets`, `git.write`, `git.discard`, `worktree.manage`, `worktree.discard`, `shell.run`, `shell.network`.
 
 ### 2.6 Security semantics (details in [SECURITY_MODEL.md](SECURITY_MODEL.md))

@@ -4,9 +4,9 @@ Execution, Git, worktrees, command running, sandboxing and testing.
 
 - **Status snapshot date:** 2026-10-23
 - **Branch audited:** `execution` (HEAD `a91605f`)
-- **Test baseline:** `python -m pytest -q` → 915 passed, 6 skipped (symlink/POSIX-mode tests and the real-container test skip where unavailable), 0 failed (default `testpaths` now exclude the
+- **Test baseline:** `python -m pytest -q` → 1005 passed, 6 skipped (symlink/POSIX-mode tests and the real-container test skip where unavailable), 0 failed (default `testpaths` now exclude the
   intentionally failing `fixtures/` repo). Before the first slices it was 202 passed + 1 fixture failure.
-- **Progress log:** slices A1–A3, B1–B2, C1–C4 (Phase 2 filesystem) C5–C9 (Phase 3 patches) D1–D3, D9 (Phase 4 Git) D4–D8, D11 (Phase 5 worktrees) E1–E5 (Phase 6 commands) H1–H6 (Phase 7 security) and F1–F6 (Phase 8 tests) are done; B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
+- **Progress log:** slices A1–A3, B1–B2, C1–C4 (Phase 2 filesystem) C5–C9 (Phase 3 patches) D1–D3, D9 (Phase 4 Git) D4–D8, D11 (Phase 5 worktrees) E1–E5 (Phase 6 commands) H1–H6 (Phase 7 security) F1–F6 (Phase 8 tests) and F7–F8 (Phase 9 verification) are done; B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
 
 Companion documents: [ARCHITECTURE.md](ARCHITECTURE.md) (how the system fits together),
 [API_CONTRACTS.md](API_CONTRACTS.md) (baseline runtime ↔ execution contract),
@@ -65,7 +65,7 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 | 6 | Controlled command execution | 🟡 PARTIAL | Hardened runner (env policy, output bounds, verified tree kill, cancel, limits), command policy and `shell.run` done; POSIX paths unverified, no sandbox yet |
 | 7 | Sandboxing & execution security | 🟡 PARTIAL | Threat model, path/secret hardening, levels & profiles, container backend with fail-closed enforcement done; **real-container proof pending** |
 | 8 | Test discovery & execution | 🟡 PARTIAL | Discovery, 7 adapters, JUnit/JSON/console parsing, normalized statuses, targeted runs, version fingerprint + freshness done; only Python adapters run against real tools |
-| 9 | Deterministic verification evidence | 🟡 PARTIAL | Test evidence now carries its source version and a freshness check; check kinds, authoritative status and Role 1 hand-off pending |
+| 9 | Deterministic verification evidence | 🟡 PARTIAL | 8 check kinds with traceable evidence, stale/unstable detection, next-step hints and a Role 1 `Verifier` adapter done; Role 1 sign-off, artifact refs (Phase 10) and a `verify.run` action pending |
 | 10 | Artifacts, retention & audit | ⬜ PENDING | Only runtime events exist |
 | 11 | Concurrency, interruption & recovery | ⬜ PENDING | — |
 | 12 | Cross-role integration | 🟡 PARTIAL | Role 1 wired in; Role 2 and Role 3 pending |
@@ -237,12 +237,13 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 
 - ✅ Role 1 verification abstraction: `Verifier`, `CommandVerifier`, `VerificationResult`/`VerificationCheck` (`PASS/FAIL/ERROR/TIMEOUT`), runtime integration, replanning with verification evidence, event replay (`runtime/verification/`, `runtime/planner/replanner.py`).
 - ✅ `execute_task` produces real patch + test + diff evidence and emits `VERIFICATION_*` events.
-- ⬜ Supported check kinds: tests, build, lint, type-check, file exists, content condition, diff contains change, no prohibited paths modified.
-- ⬜ Evidence includes the underlying command result and artifact references.
-- ✅ (tests) Each test result carries `workspace_version`; `test.freshness` reports staleness after later edits. Other check kinds are not built yet.
-- ⬜ Agree one authoritative verification status with Role 1 (avoid two competing systems).
-- ⬜ Failure evidence sufficient for inspect / retrieve more output / targeted retest / modify patch / replan / stop.
-- 🟡 Tests for stale results and inconsistent reports exist for test runs (`test_test_service.py`); not yet for other check kinds.
+- ✅ Supported check kinds (`execution/verification/checks.py`, validated declarative models): `tests`, `build`, `lint`, `typecheck`, `file_exists`, `file_content` (contains / not_contains / sha256), `diff_contains` (added/removed lines, min files changed), `no_prohibited_paths` (prohibited globs and/or an allow-list; staged, unstaged, untracked, conflicted, renamed and — with `base` — committed changes). Every check is established by gateway tool calls, so capabilities, the command policy, path/secret rules and the sandbox all apply. Build/lint/typecheck commands must be of the matching policy category (a "lint" check that actually runs the test suite is an ERROR); a tool that is not installed is an ERROR, not a code failure.
+- 🟡 Evidence includes the underlying result: every check records its gateway calls (`tool`, unique `action_id`, success, exit code, error category, truncation, artifact refs, output excerpts), the observed facts (counts, failing cases, matched/missing text, violating paths) and a message with the first failing cases. Real artifact references wait for the Phase 10 store.
+- ✅ Freshness: test results carry `workspace_version`; a verification run fingerprints the workspace before, after each program-running check and at the end. A PASS is downgraded to ERROR if the tree changed while it ran (`require_stable`, default on), and `report_is_current()` reports staleness later.
+- 🟡 One authoritative status: **Role 1's `VerificationStatus` (`PASS/FAIL/ERROR/TIMEOUT`) is the only verdict.** `ExecutionVerifier` implements Role 1's `Verifier` and folds the evidence deterministically (TIMEOUT > ERROR > FAIL > PASS; no checks, a bound-to-another-workspace verifier or a crashed check is never a PASS). `ExecutionResult.success` and `TestRunResult` are inputs, not verdicts. Two optional fields (`kind`, `evidence`) were added to Role 1's `VerificationCheck`/`VerificationResult`; old producers are unaffected. **Role 1 sign-off, and replacing `CommandVerifier` in the real composition, are still open.**
+- ✅ Failure evidence suggests the next move: each non-passing check lists `next_steps` from `inspect`, `retrieve_output`, `retest_targeted`, `modify_patch`, `replan`, `stop` (`replan`/`stop` only when the check was blocked, e.g. permission or policy, because retrying cannot help).
+- ✅ Tests: `test_verification.py` (80: globs, parsing/validation, every check kind against real repos, stale and unstable workspaces, timeouts, capability/policy blocks) and `test_execution_verifier.py` (10: the Role 1 adapter and the runtime completing or failing on the evidence).
+- ⬜ Left for later: a `verify.run` gateway action so a planner can request verification, check specs in Role 1's task/plan schema, verification events from the execution side, regex content conditions (deliberately omitted: unbounded patterns), and seeing changes to git-ignored files (e.g. a modified `.env`) in `no_prohibited_paths`.
 
 ### Phase 10 — Execution artifacts, output retention and auditability ⬜ PENDING
 
@@ -373,7 +374,8 @@ sandbox → tests → verification → recovery/artifacts → integration/securi
 **Slice group F — Tests & verification**
 - ✅ F1. Detect pytest/unittest from config (project interpreter/venv still ⬜). ✅ F2. JUnit XML parse → `RunReport` (+ `to_runtime_result`). ✅ F3. Targeted runs. ✅ F4. npm/Maven/Gradle/Cargo/Go adapters (unverified against real tools).
 - ⬜ F4b. Run the non-Python adapters against real projects and fix what breaks. ⬜ F4c. Use the project's own interpreter/venv.
-- ✅ F5. Record workspace revision on each test run; ✅ F6. staleness check (`test.freshness`); F7. check kinds (build/lint/typecheck/file/diff/prohibited-path); F8. hand evidence to Role 1's verifier; route `CommandVerifier` through the runner.
+- ✅ F5. Record workspace revision on each test run; ✅ F6. staleness check (`test.freshness`); ✅ F7. check kinds (tests/build/lint/typecheck/file exists/file content/diff contains/prohibited paths); ✅ F8. `ExecutionVerifier` hands the evidence to Role 1 as a `VerificationResult`.
+- ⬜ F9. Replace `CommandVerifier` with `ExecutionVerifier` in the real composition (needs Role 1) — same as E9. ⬜ F10. `verify.run` gateway action + check specs in Role 1's task/plan schema. ⬜ F11. Include git-ignored files in the prohibited-path check.
 
 **Slice group G — Artifacts, recovery, integration**
 - G1. Artifact store + bounded results. G2. Redaction. G3. Execution records + running-ops table. G4. Reconcile on restart. G5. Failure-injection suite.
@@ -412,7 +414,7 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 - [~] Implement test discovery and runner adapters — 7 adapters built; only pytest/unittest proven against real tools
 - [x] Normalize machine-readable test results — JUnit XML / `go test -json` / console into `RunReport` and Role 1's `TestRunResult`
 - [x] Associate results with workspace versions — content fingerprint + `test.freshness`
-- [~] Provide actual verification evidence to Role 1 — versioned `RunReport` from `test.run`; hand-off to Role 1's verifier and other check kinds pending
+- [~] Provide actual verification evidence to Role 1 — 8 check kinds, versioned traceable evidence and an `ExecutionVerifier` that works in the runtime are done; Role 1 has not adopted it yet and artifact references wait for Phase 10
 
 **F. Artifacts and recovery**
 - [ ] Add bounded output and artifact references
@@ -461,7 +463,7 @@ rather than preserving it for review.
 | Repo-context refresh after edits | 3 & 4 | ⬜ |
 | Worktree ownership & lifecycle | 1 & 4 | ⬜ → `WORKTREE_LIFECYCLE.md` |
 | Diff / patch / finalization semantics | 2 & 4 | ⬜ |
-| Test results & verification status | 1 & 4 (2 presents) | 🟡 |
+| Test results & verification status | 1 & 4 (2 presents) | 🟡 proposal built: Role 1's `VerificationStatus` is the single verdict, Role 4 supplies evidence + `next_steps` via optional fields; **Role 1 sign-off pending** |
 | Artifact references & error formats | 1, 2, 4 (3 sources) | ⬜ |
 | Failure recovery & cancellation | 1 & 4 (2 controls) | ⬜ |
 

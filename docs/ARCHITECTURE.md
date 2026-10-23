@@ -85,6 +85,8 @@ ASEOS/
 │   ├── testing/              service.py (detect → run → normalize), adapters.py (pytest, unittest, npm, Maven,
 │   │                         Gradle, Cargo, Go), junit.py, console.py, model.py (RunReport); runner.py = legacy helper
 │   ├── versioning.py         workspace_version(): content fingerprint used to date test results
+│   ├── verification/         checks.py (8 check kinds), service.py (run_checks → evidence), evidence.py,
+│   │                         globs.py, verifier.py (ExecutionVerifier = Role 1 Verifier adapter)
 │   ├── tests/                unit tests for the execution modules (+ empty runner.py placeholder)
 │   ├── worktrees/            manager.py (lifecycle), store.py (registry + repo lock), record.py, ids.py
 │   └── demo.py               `python -m execution.demo`
@@ -227,13 +229,18 @@ Still planned: cancellation state, an artifact store, and workspace revision on 
 ## 9. Verification flow
 
 1. The runtime finishes (or reaches a checkpoint in) its action list.
-2. The `Verifier` — currently `CommandVerifier`, which runs configured commands in `task.workspace_path` — returns
+2. The `Verifier` — by default `CommandVerifier`, which runs configured commands in `task.workspace_path` — returns
    a `VerificationResult` with per-command `VerificationCheck`s (`PASS`/`FAIL`/`ERROR`/`TIMEOUT`).
 3. On failure, the `Replanner` receives the verification evidence and produces a revised plan, up to `max_replans`.
 4. Verification events are written to the event store and can be replayed.
 
-Planned: verification evidence produced by Role 4 and tied to the exact workspace revision, with staleness
-detection after later edits.
+Role 4 can now supply that evidence: `execution.verification.ExecutionVerifier` implements the same `Verifier`
+interface, runs typed checks (tests, build, lint, type-check, file exists, file content, diff contains, no
+prohibited paths) through the execution gateway, and returns a `VerificationResult` whose per-check evidence names
+the gateway calls, the observed facts, the workspace version and the suggested next steps. Role 1's
+`VerificationStatus` stays the only verdict; a PASS is withheld if the workspace changed while verifying. It is
+**not yet the default**: the runtime still composes `CommandVerifier` unless a caller passes an `ExecutionVerifier`
+(awaiting Role 1's agreement, see EXECUTION_PLAN §6).
 
 ## 10. Design direction (target architecture)
 
@@ -266,7 +273,7 @@ artifacts, command policy and sandboxing — will be added in slices so the runt
   `tests/agent/test_real_executor_integration.py`.
 - Role 1 suites: `tests/agent`, `decision`, `events`, `llm`, `planner`, `schemas`, `state`, `task`, `tools`,
   `verification`.
-- Baseline at time of writing: **915 passed, 6 skipped** (symlink-file and POSIX-mode tests skip when the OS does not allow
+- Baseline at time of writing: **1005 passed, 6 skipped** (symlink-file and POSIX-mode tests skip when the OS does not allow
   them; a Windows directory-junction test covers the same escape). `pyproject.toml` `testpaths` limits default collection to `tests/`
   and `execution/tests/`; the deliberately broken `fixtures/repositories/calculator` test (which the demo fixes)
   is not collected.
