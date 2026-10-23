@@ -22,6 +22,12 @@ from execution.gateway.git_tools import (
     GitStageTool,
     GitStatusTool,
 )
+from execution.gateway.worktree_tools import (
+    WorktreeCreateTool,
+    WorktreeListTool,
+    WorktreeReconcileTool,
+    WorktreeRemoveTool,
+)
 from execution.gateway.patch_tools import PatchApplyTool, PatchValidateTool
 from execution.gateway.tool import (
     Tool,
@@ -125,5 +131,9 @@ def default_tools() -> list[Tool]:
         GitCommitTool(),
         GitBranchTool(),
         GitDiscardTool(),
+        WorktreeCreateTool(),
+        WorktreeListTool(),
+        WorktreeRemoveTool(),
+        WorktreeReconcileTool(),
         RunCommandTool(),
     ]

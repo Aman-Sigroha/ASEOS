@@ -1,30 +1,38 @@
+import shutil
+import tempfile
 from pathlib import Path
 
-from execution.git.worktree import create_worktree, remove_worktree
+from execution.git.diff import get_diff
 from execution.patches.apply import apply_patch
 from execution.testing.runner import run_tests
-from execution.git.operations import git_diff
+from execution.worktrees.manager import WorktreeManager
 
 
-REPO_PATH = "fixtures/repositories/calculator"
+FIXTURE_PATH = "fixtures/repositories/calculator"
 TASK_ID = "fix-divide"
 
 
 def main():
-    repo_path = str(Path(REPO_PATH).resolve())
+    fixture = Path(FIXTURE_PATH).resolve()
+
+    # Work on a throwaway copy so the demo never touches the fixture repo.
+    sandbox = Path(tempfile.mkdtemp(prefix="aseos-demo-"))
+    repo_path = sandbox / "calculator"
+    shutil.copytree(fixture, repo_path)
 
     print("=" * 60)
     print("ASEOS Candidate 4 - Execution Demo")
     print("=" * 60)
 
+    manager = WorktreeManager(repo_path)
+
     print("\n[1] Creating isolated worktree...")
 
-    worktree = create_worktree(
-        repo_path,
-        TASK_ID,
-    )
+    record = manager.create(TASK_ID)
+    worktree = record.path
 
     print(f"Worktree: {worktree}")
+    print(f"Branch:   {record.branch} (base {record.base_commit[:10]})")
 
     try:
         print("\n[2] Applying patch...")
@@ -61,9 +69,11 @@ def main():
             print("\n--- TEST ERRORS ---")
             print(test_result["stderr"])
 
-        print("\n[4] Git diff...")
+        print("\n[4] Git diff against the base commit...")
 
-        diff = git_diff(worktree)
+        diff = get_diff(
+            Path(worktree), mode="base", base=record.base_commit
+        )["diff"]
 
         print("--- DIFF ---")
         print(diff)
@@ -75,13 +85,20 @@ def main():
         else:
             print("FAILURE: Tests did not pass.")
 
-    finally:
-        print("\n[6] Removing worktree...")
+        print("\n[6] Safe cleanup check...")
 
-        remove_worktree(
-            repo_path,
-            TASK_ID,
+        assessment = manager.assess(record)
+        print(
+            "Unreviewed work:",
+            ", ".join(assessment["cleanup_blockers"]) or "none",
         )
+
+    finally:
+        print("\n[7] Removing the demo worktree (explicitly confirmed)...")
+
+        # The demo owns this throwaway copy, so discarding is intentional.
+        manager.remove(record.worktree_id, discard_confirmed=True)
+        shutil.rmtree(sandbox, ignore_errors=True)
 
         print("Worktree removed.")
 

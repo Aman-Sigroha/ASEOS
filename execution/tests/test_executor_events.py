@@ -1,3 +1,4 @@
+import shutil
 from pathlib import Path
 from uuid import uuid4
 
@@ -5,10 +6,10 @@ from execution.executor import execute_task
 from runtime.events.emitter import EventEmitter
 
 
-def test_execute_task_emits_completion_event():
-    repo_path = str(
-        Path("fixtures/repositories/calculator").resolve()
-    )
+def test_execute_task_emits_completion_event(tmp_path):
+    source = Path("fixtures/repositories/calculator").resolve()
+    repo_path = str(tmp_path / "calculator")
+    shutil.copytree(source, repo_path)
     task_id = f"test-executor-events-{uuid4().hex[:8]}"
 
     emitter = EventEmitter()

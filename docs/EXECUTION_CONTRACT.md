@@ -37,6 +37,10 @@ The workspace is trusted gateway context (`ToolContext`); it is never taken from
 | `git.commit` | `GIT_COMMIT` | `git.write` | no | `{message, paths}` |
 | `git.branch_create` | `GIT_BRANCH` | `git.write` | no | `{name, start_point?}`; does not check out |
 | `git.discard` | `GIT_DISCARD` | `git.discard` | no | `{paths}`; returns the discarded diff |
+| `git.worktree.create` | `WORKTREE_CREATE` | `worktree.manage` | no | `{task_id, base='HEAD'}`; returns the worktree record |
+| `git.worktree.list` | `WORKTREE_LIST` | `git.read` | yes | `{include_removed?, assess=true}`; records plus live assessment |
+| `git.worktree.remove` | `WORKTREE_REMOVE` | `worktree.manage` | no | `{worktree_id, discard_unreviewed?}`; see §2.4 |
+| `git.worktree.reconcile` | `WORKTREE_RECONCILE` | `worktree.manage` | no | `{}`; report only, deletes nothing |
 | `shell.run` | `RUN_COMMAND` | `shell.run` | no | **Not granted by default; always denied** until a command policy exists |
 
 Tool ids use the planned namespaces (`repo.*`, `git.*`, `shell.*`, `test.*`, `patch.*`). The runtime's
@@ -75,7 +79,16 @@ canonical id. Aligning Role 1's registry names is an open item.
 - **Evidence on every mutation:** `data.other_changes` (dirty paths outside the operation's scope, before it ran) and `data.status_after` (counts).
 - **Locks:** a Git index lock held by another process gives `GIT_FAILURE` with `data.lock_conflict=true`; retry later.
 
-Default granted capabilities: `fs.read`, `fs.write`, `git.read`, `test.run`. Not granted by default: `fs.delete`, `git.write`, `git.discard`, `shell.run`.
+### 2.4 Worktree semantics
+
+- **Where:** worktree tools must run from the *main checkout* (workspace = repository root, not a linked worktree). After `git.worktree.create`, the caller builds a **new gateway bound to `data.path`** to work inside it; the main gateway never sees the task's files.
+- **Isolation:** the worktree starts at `data.base_commit` on branch `aseos/<task_id>`. Uncommitted edits in the main checkout are not part of it and are never modified.
+- **Identity:** `worktree_id` (from the record), not the path, identifies a worktree. One live worktree per `task_id`.
+- **Remove:** refused with `PERMISSION_DENIED` and `data.blockers` when there are uncommitted changes, commits that exist on no other ref, or the worktree is locked. `discard_unreviewed=true` is honoured only if the gateway was granted `worktree.discard` by trusted code; the model cannot grant it. A confirmed discard first writes `data.backup.files.patch` (uncommitted changes) and/or `refs/aseos/removed/<id>` (unmerged commits); `data.backup.complete=false` lists anything the patch could not capture.
+- **Reconcile:** `data` lists `ok`, `missing`, `recovered`, `interrupted`, `detached_dirs`, `orphan_dirs`, `unrecorded_git_worktrees`, `prune_candidates`, `corrupt_records`. Only record statuses change; nothing is deleted.
+- **Locking:** concurrent creates/removes are serialized; a busy registry returns `GIT_FAILURE` with `data.lock_conflict=true`.
+
+Default granted capabilities: `fs.read`, `fs.write`, `git.read`, `test.run`. Not granted by default: `fs.delete`, `git.write`, `git.discard`, `worktree.manage`, `worktree.discard`, `shell.run`.
 
 ## 3. `ExecutionResult`
 
@@ -131,5 +144,5 @@ See [EXECUTION_PLAN.md](EXECUTION_PLAN.md) for the scheduled work.
 4. Add gateway-level tests for success, invalid arguments, denied capability and each error category.
 
 `ActionType` in `runtime/schemas/action.py` gates which action types exist; new ones need a (backward-compatible) schema
-change. `LIST_DIR`, `FILE_INFO`, `WRITE`, `VALIDATE_PATCH`, `APPLY_PATCH`, `GIT_STATUS`, `GIT_INFO`, `GIT_STAGE`, `GIT_COMMIT`, `GIT_BRANCH` and `GIT_DISCARD` were added that way. They are **not yet** in Role 1's `ToolRegistry.default()`,
+change. `LIST_DIR`, `FILE_INFO`, `WRITE`, `VALIDATE_PATCH`, `APPLY_PATCH`, `GIT_STATUS`, `GIT_INFO`, `GIT_STAGE`, `GIT_COMMIT`, `GIT_BRANCH`, `GIT_DISCARD`, `WORKTREE_CREATE`, `WORKTREE_LIST`, `WORKTREE_REMOVE` and `WORKTREE_RECONCILE` were added that way. They are **not yet** in Role 1's `ToolRegistry.default()`,
 so the planner cannot offer them until Role 1 registers them.

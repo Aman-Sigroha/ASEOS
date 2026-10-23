@@ -21,6 +21,10 @@ ActionType = Literal[
     "GIT_COMMIT",
     "GIT_BRANCH",
     "GIT_DISCARD",
+    "WORKTREE_CREATE",
+    "WORKTREE_LIST",
+    "WORKTREE_REMOVE",
+    "WORKTREE_RECONCILE",
 ]
 
 

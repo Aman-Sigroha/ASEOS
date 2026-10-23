@@ -1,9 +1,11 @@
+from pathlib import Path
 from uuid import uuid4
 
-from execution.git.worktree import create_worktree, remove_worktree
+from execution.git.diff import get_diff
+from execution.git.repo import GitError
 from execution.patches.apply import apply_patch
 from execution.testing.runner import run_tests
-from execution.git.operations import git_diff
+from execution.worktrees.manager import WorktreeManager
 from runtime.events.emitter import EventEmitter
 from runtime.events.event import AgentEvent
 
@@ -13,8 +15,17 @@ def execute_task(
     task_id: str,
     patch: dict,
     event_emitter: EventEmitter | None = None,
+    keep_worktree: bool | None = None,
+    manager: WorktreeManager | None = None,
 ) -> dict:
-    """Execute a patch in an isolated worktree and report its result."""
+    """Execute a patch in an isolated worktree and report its result.
+
+    The worktree is kept whenever it holds work worth reviewing (a
+    successful or failed patch/test run). With `keep_worktree=None` it is
+    removed only when it is clean and has no unmerged commits; with
+    `keep_worktree=False` removal is attempted but still refused if it
+    would lose work. The result's `worktree` entry says what happened.
+    """
 
     def emit_event(
         event_type: str,
@@ -32,11 +43,12 @@ def execute_task(
                 )
             )
 
-    worktree = None
+    manager = manager or WorktreeManager(repo_path)
+    record = manager.create(task_id)
+    worktree = record.path
+    outcome = "failed"
 
     try:
-        worktree = create_worktree(repo_path, task_id)
-
         patch_result = apply_patch(worktree, patch)
 
         if patch_result["status"] != "PASS":
@@ -45,12 +57,18 @@ def execute_task(
                 "Code patch could not be applied",
                 {"patch": patch_result},
             )
-            return {
-                "status": "ERROR",
-                "patch": patch_result,
-                "tests": None,
-                "diff": "",
-            }
+            return _finish(
+                manager,
+                record,
+                keep_worktree,
+                outcome,
+                {
+                    "status": "ERROR",
+                    "patch": patch_result,
+                    "tests": None,
+                    "diff": "",
+                },
+            )
 
         emit_event(
             "ACTION_COMPLETED",
@@ -65,7 +83,13 @@ def execute_task(
         )
 
         test_result = run_tests(worktree)
-        diff = git_diff(worktree)
+        diff = get_diff(
+            Path(record.path),
+            mode="base",
+            base=record.base_commit,
+            include_untracked=True,
+            max_bytes=50_000_000,
+        )["diff"]
 
         status = (
             "PASS"
@@ -81,6 +105,7 @@ def execute_task(
         }
 
         if status == "PASS":
+            outcome = "completed"
             emit_event(
                 "VERIFICATION_COMPLETED",
                 "Tests passed",
@@ -93,7 +118,7 @@ def execute_task(
                 {"status": status, "tests": test_result},
             )
 
-        return result
+        return _finish(manager, record, keep_worktree, outcome, result)
 
     except Exception as exc:
         emit_event(
@@ -101,8 +126,47 @@ def execute_task(
             "Code execution encountered an error",
             {"error": str(exc)},
         )
+        _safe_mark(manager, record.worktree_id, "failed", str(exc))
         raise
 
-    finally:
-        if worktree is not None:
-            remove_worktree(repo_path, task_id)
+
+def _safe_mark(manager: WorktreeManager, worktree_id: str, status, note=""):
+    try:
+        manager.mark(worktree_id, status, note)
+    except GitError:
+        pass
+
+
+def _finish(
+    manager: WorktreeManager,
+    record,
+    keep_worktree: bool | None,
+    outcome: str,
+    result: dict,
+) -> dict:
+    """Record the outcome, then clean up only when that loses nothing."""
+
+    _safe_mark(manager, record.worktree_id, outcome)
+    removed = False
+    note = None
+    assessment = manager.assess(manager.get(record.worktree_id))
+
+    if keep_worktree is not True and (
+        keep_worktree is False or not assessment["unreviewed"]
+    ):
+        try:
+            manager.remove(record.worktree_id)
+            removed = True
+        except GitError as exc:
+            note = exc.message
+
+    result["worktree"] = {
+        "id": record.worktree_id,
+        "path": record.path,
+        "branch": record.branch,
+        "base_commit": record.base_commit,
+        "status": "removed" if removed else outcome,
+        "preserved": not removed,
+        "note": note,
+    }
+    return result

@@ -4,9 +4,9 @@ Execution, Git, worktrees, command running, sandboxing and testing.
 
 - **Status snapshot date:** 2026-10-23
 - **Branch audited:** `execution` (HEAD `a91605f`)
-- **Test baseline:** `python -m pytest -q` → 411 passed, 5 skipped (symlink/POSIX-mode tests skip where unavailable), 0 failed (default `testpaths` now exclude the
+- **Test baseline:** `python -m pytest -q` → 483 passed, 5 skipped (symlink/POSIX-mode tests skip where unavailable), 0 failed (default `testpaths` now exclude the
   intentionally failing `fixtures/` repo). Before the first slices it was 202 passed + 1 fixture failure.
-- **Progress log:** slices A1–A3, B1–B2, C1–C4 (Phase 2 filesystem) C5–C9 (Phase 3 patches) and D1–D3, D9 (Phase 4 Git) are done; B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
+- **Progress log:** slices A1–A3, B1–B2, C1–C4 (Phase 2 filesystem) C5–C9 (Phase 3 patches) D1–D3, D9 (Phase 4 Git) and D4–D8, D11 (Phase 5 worktrees) are done; B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
 
 Companion documents: [ARCHITECTURE.md](ARCHITECTURE.md) (how the system fits together),
 [API_CONTRACTS.md](API_CONTRACTS.md) (baseline runtime ↔ execution contract),
@@ -60,7 +60,7 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 | 2 | Safe filesystem tools | 🟡 PARTIAL | Bounded reads, line ranges, list/info, hash-checked atomic writes, symlink policy done; change notifications (Role 3) pending |
 | 3 | Patch validation & application | 🟡 PARTIAL | Unified-diff validate/apply (create/modify/delete, multi-file, base hashes, rollback, reverse) done; persisted recovery artifacts + task-level provenance pending |
 | 4 | Git status, diff & operations | 🟡 PARTIAL | Structured status/diff/info and scoped stage/commit/branch/discard done; worktree-lifecycle protection of user work (Phase 5) pending |
-| 5 | Worktrees & task isolation | 🟡 PARTIAL | Create/remove works; no metadata, locking, recovery, safe cleanup |
+| 5 | Worktrees & task isolation | 🟡 PARTIAL | Registry, base commits, safe/backed-up removal, locking, reconciliation, gateway tools done; retention policy and live-owner leases pending |
 | 6 | Controlled command execution | 🟡 PARTIAL | `run_command` with list args + timeout; no env policy, caps, tree-kill, cancel |
 | 7 | Sandboxing & execution security | ⬜ PENDING | Only worktree isolation + `RUN_COMMAND` disabled |
 | 8 | Test discovery & execution | 🟡 PARTIAL | Hardcoded `python -m pytest`; no discovery or report parsing |
@@ -70,7 +70,7 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 | 12 | Cross-role integration | 🟡 PARTIAL | Role 1 wired in; Role 2 and Role 3 pending |
 | 13 | Security, testing & performance qualification | 🟡 PARTIAL | Unit/integration tests only |
 
-**Role 4 completion checklist: 4 ✅ done · 12 🟡 partial · 10 ⬜ pending (of 26)** (an item flips only when its full acceptance criterion is met). See [Section 4](#4-role-4-completion-checklist).
+**Role 4 completion checklist: 6 ✅ done · 11 🟡 partial · 9 ⬜ pending (of 26)** (an item flips only when its full acceptance criterion is met). See [Section 4](#4-role-4-completion-checklist).
 
 ---
 
@@ -165,18 +165,20 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 
 *Completion criterion: each code-writing task runs in a known workspace, the main checkout is preserved, and cleanup/recovery never loses unreviewed changes.*
 
-- ✅ `create_worktree(repo, task_id)` → `<repo>/.aseos_worktrees/<task_id>` on new branch `aseos/<task_id>`.
-- ✅ `remove_worktree` removes worktree → prunes → deletes the temporary branch; tolerant of already-removed state.
-- ✅ Tests in `execution/tests/test_worktrees.py`; used by `execute_task` and the demo.
-- ✅ `task_id` validated (`validate_task_id`) and worktree paths confined to `.aseos_worktrees` for create and remove, with tests.
-- ⬜ Select a base revision explicitly; record base commit.
-- ⬜ Worktree metadata record (id, task id, repo identity, path, branch, base commit, created, status, cleanup eligibility) with a registry/store; do not trust caller-supplied paths.
-- ⬜ Dirty/unreviewed-change check before removal (currently `--force` + `branch -D`, and `execute_task` always removes in `finally`).
-- ⬜ Prevent two tasks sharing a worktree; locking around shared Git admin data.
-- ⬜ Ensure cleanup can only delete inside the managed worktree area.
-- ⬜ Restart reconciliation: detect orphaned/missing worktrees, never auto-delete ambiguous ones.
-- ⬜ Concurrency and recovery tests.
-- ⬜ Surface the managed `.aseos_worktrees` directory so it can't be committed/indexed by accident.
+- ✅ `WorktreeManager` (`execution/worktrees/`): `create(task_id, base, owner)`, `get`, `list`, `find_live`, `assess`, `mark`, `remove`, `reconcile`, `prune_missing`. The old `create_worktree` / `remove_worktree` helpers are thin wrappers over it.
+- ✅ Layout: `<repo>/.aseos_worktrees/<task_id>` on branch `aseos/<task_id>`, created from an explicit **base commit** (`base` ref resolved to a hash; default `HEAD`). The main checkout is never modified; its uncommitted edits are neither visible to nor touched by the task. `.aseos_worktrees/` is added to `.git/info/exclude`, so it does not show up in the main checkout's `git status`.
+- ✅ Metadata record per worktree (`worktree_id`, `task_id`, `repo_id`, `repo_root`, `path`, `branch`, `base_ref`, `base_commit`, `owner`, `status`, timestamps, note, backups) stored as JSON in `<git common dir>/aseos/worktrees/` (not tracked, shared by all worktrees). The record is the authority; a caller-supplied path is never trusted.
+- ✅ Statuses: `creating` → `active` → `completed` / `failed` / `abandoned`; `missing`; `removing` → `removed`. `creating` and `removing` are persisted *before* the risky step.
+- ✅ `assess()` observes real state (disk + Git): exists, registered in Git, locked, branch exists, staged/unstaged/untracked/conflicted paths, in-progress operation, commits ahead of the base, whether those commits also exist on another ref, and a list of `cleanup_blockers`.
+- ✅ `task_id` validated; one live worktree per task; an existing directory or branch without a matching record is refused, never reused or deleted.
+- ✅ Safe removal: only the recorded path, which must equal the managed layout, is eligible. Refused for uncommitted changes, commits that exist nowhere else, locked worktrees, directories Git does not know, and tampered records. Uses `git worktree remove` (no `--force` unless the caller confirmed discarding).
+- ✅ Confirmed discard (`discard_confirmed=True`, trusted callers only) backs up first: a patch of uncommitted changes (including untracked text files) under `<common>/aseos/removed/`, and `refs/aseos/removed/<id>` pointing at unmerged commits. The result says if the patch could not capture something (binary / oversized untracked files). The branch is deleted only when nothing is lost.
+- ✅ `execute_task` no longer destroys its own work: the worktree is kept (`completed`/`failed`) whenever it holds changes; it is removed automatically only if clean. `keep_worktree=False` still refuses to lose work. The reported diff is now computed against the base commit and includes new files.
+- ✅ Concurrency: registry and Git-administration changes are serialized by a reentrant in-process lock plus an exclusive lock file (stale after 300 s); Git lock clashes are retried briefly. Tested with 6 threads, 5 racing creates of the same task (exactly one wins) and 3 separate processes.
+- ✅ Restart reconciliation (`reconcile`): compares records, `git worktree list` and the disk; recovers interrupted create/remove; marks vanished directories `missing`; **reports** orphan directories, unrecorded Git worktrees, detached directories and corrupt records. It changes record statuses only and deletes nothing. Stale Git entries are dropped only by an explicit `prune_missing`, which keeps the branch.
+- ✅ Gateway tools (all need `worktree.manage`, not granted by default; `git.worktree.list` needs `git.read`): `git.worktree.create`, `.list`, `.remove`, `.reconcile`. `discard_unreviewed` on remove works only if the *trusted caller* granted `worktree.discard` — the model cannot authorize its own discard. The tools refuse to run from inside a worktree.
+- ✅ Tests: `test_worktree_manager.py` (53), `test_worktree_tools_and_executor.py` (19), plus the legacy `test_worktrees.py`.
+- 🟡 Not covered: automatic cleanup policies/retention (nothing is ever deleted unless a trusted caller asks); `git worktree lock` is only *respected*, not set by us; no lease/heartbeat to detect a *live* owner process (two callers that both know a worktree id can still use it concurrently — the gateway does not stop that); a worktree on a removed drive looks `missing`; the stale-lock timeout is time-based because process liveness cannot be checked portably; submodules inside worktrees are not handled.
 
 ### Phase 6 — Controlled command execution 🟡 PARTIAL
 
@@ -302,7 +304,7 @@ Fix these as early slices; they are small and risk-reducing.
 | # | Issue | Location | Why it matters |
 | - | ----- | -------- | -------------- |
 | 1 | ~~`task_id` not validated before being joined into a path and branch name~~ **Fixed (slice A1)** | `execution/git/worktree.py` | Was: `../` could place a worktree (and a later `--force` removal) outside `.aseos_worktrees` |
-| 2 | `execute_task` always calls `remove_worktree` in `finally`, with `--force` and `branch -D` | `execution/executor.py`, `worktree.py` | Deletes the agent's changes (including a passing result) before anyone reviews them |
+| 2 | ~~`execute_task` always removed its worktree with `--force` and `branch -D`~~ **Fixed (Phase 5)**: work is preserved; removal refuses to lose it | `execution/executor.py`, `worktrees/manager.py` | Was: deleted the agent's changes before anyone reviewed them |
 | 3 | `run_command` accepts any `cwd` and inherits the full environment | `execution/commands/runner.py` | No workspace enforcement; secrets leak into child processes |
 | 4 | Timeout kills only the direct child; output is unbounded | `execution/commands/runner.py` | Orphaned grandchildren; memory blow-up on noisy commands |
 | 5 | `CommandVerifier` uses `create_subprocess_shell` with string commands | `runtime/verification/command.py` | Shell injection surface; bypasses execution boundary (Role 1 owns, needs coordination) |
@@ -343,10 +345,13 @@ sandbox → tests → verification → recovery/artifacts → integration/securi
 
 **Slice group D — Git & worktrees**
 - ✅ D1. Consolidate git status/diff modules; error mapping. ✅ D2. Staged/untracked/rename/stat/base-explicit diff. ✅ D3. Repo identity.
-- D4. Worktree metadata registry. D5. Dirty-check before removal; stop auto-removing in `execute_task`. D6. Managed-area-only cleanup. D7. Locking. D8. Restart reconciliation.
+- ✅ D4. Worktree metadata registry. ✅ D5. Dirty-check before removal; `execute_task` no longer auto-destroys work. ✅ D6. Managed-area-only cleanup. ✅ D7. Locking. ✅ D8. Restart reconciliation.
+- ⬜ D12. Register the `WORKTREE_*` action types in Role 1's `ToolRegistry`/policy and decide who grants `worktree.manage` / `worktree.discard` (runtime or UI after user approval).
+- ⬜ D13. Tell Role 3 about worktree create/remove and give each worktree its own index key (needs the Role 3 interface).
+- ⬜ D14. Lease/heartbeat so a second live owner of the same worktree can be detected.
 - ✅ D9. Mutating git ops (branch → stage selected → commit → scoped discard), each behind its own capability.
 - ⬜ D10. Register `GIT_STATUS`, `GIT_INFO`, `GIT_STAGE`, `GIT_COMMIT`, `GIT_BRANCH`, `GIT_DISCARD` in Role 1's `ToolRegistry` and risk policy (the mutating ones should require approval).
-- ⬜ D11. Make `execute_task` use the structured diff (`mode=base`, untracked included) so new files show up in its reported diff.
+- ✅ D11. `execute_task` uses the structured diff (`mode=base`, untracked included).
 
 **Slice group E — Commands & sandbox**
 - E1. cwd enforcement + env policy. E2. Output caps + truncation metadata. E3. Process-tree kill + orphan test (Windows and POSIX). E4. Cancellation. E5. Command policy + enable `RUN_COMMAND` for an allow-list only.
@@ -379,9 +384,9 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 
 **C. Git and isolation**
 - [x] Implement Git status and diff — structured status, staged/unstaged/base diffs with stats, repo info
-- [~] Preserve existing user changes during operations — Git mutations are scoped and refuse unsafe cases; worktree removal still force-deletes (Phase 5)
-- [~] Implement worktree creation and lifecycle management — create/remove only
-- [ ] Add safe cleanup, recovery and task isolation
+- [x] Preserve existing user changes during operations — scoped Git mutations, base-commit worktrees that never touch the main checkout, removal that refuses (or backs up) unreviewed work
+- [x] Implement worktree creation and lifecycle management — registry, explicit base, statuses, assessment, gateway tools
+- [~] Add safe cleanup, recovery and task isolation — safe removal, backups, reconcile and locking done; retention policy and live-owner leases pending
 
 **D. Commands and sandbox**
 - [~] Implement bounded process execution — list args, timeout; no output/resource bounds
@@ -406,7 +411,7 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 - [ ] Coordinate index refreshes and worktrees with Role 3
 - [~] Complete security, failure-injection and performance tests — unit/integration only
 
-`[x]` done · `[~]` partial · `[ ]` pending — **4 / 12 / 10** of 26.
+`[x]` done · `[~]` partial · `[ ]` pending — **6 / 11 / 9** of 26.
 
 ---
 

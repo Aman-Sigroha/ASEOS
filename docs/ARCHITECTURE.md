@@ -81,7 +81,7 @@ ASEOS/
 │   ├── commands/runner.py    run_command(argv, cwd, timeout)
 │   ├── testing/runner.py     run_tests(worktree) → python -m pytest
 │   ├── tests/                unit tests for the execution modules (+ empty runner.py placeholder)
-│   ├── worktrees/            empty placeholder package
+│   ├── worktrees/            manager.py (lifecycle), store.py (registry + repo lock), record.py, ids.py
 │   └── demo.py               `python -m execution.demo`
 ├── intelligence/             Role 3 — empty placeholders (context, parser, scanner, search, symbols)
 ├── tests/                    Role 1 + real-executor tests (agent, decision, events, llm, planner, …)
@@ -98,7 +98,8 @@ ASEOS/
 - **Schemas** (`runtime/schemas/`): `Action` (`id`, `type`, `payload`), `ExecutionResult`, `Plan`, `Task`,
   `RepositoryContext`, `TestRunResult`, `TaskResult`.
 - **Action types:** `SEARCH`, `READ`, `EDIT`, `RUN_TEST`, `RUN_COMMAND`, `GIT_DIFF`, plus `LIST_DIR`, `FILE_INFO`, `WRITE`,
-  `VALIDATE_PATCH`, `APPLY_PATCH`, `GIT_STATUS`, `GIT_INFO`, `GIT_STAGE`, `GIT_COMMIT`, `GIT_BRANCH`, `GIT_DISCARD`
+  `VALIDATE_PATCH`, `APPLY_PATCH`, `GIT_STATUS`, `GIT_INFO`, `GIT_STAGE`, `GIT_COMMIT`, `GIT_BRANCH`, `GIT_DISCARD`,
+  `WORKTREE_CREATE`, `WORKTREE_LIST`, `WORKTREE_REMOVE`, `WORKTREE_RECONCILE`
   (all implemented by the gateway but not yet in `ToolRegistry.default()`).
 - **Planning:** `Planner` produces a `Plan` of steps; `ActionGenerator` maps each step to an `Action`.
 - **Decisions:** a `DecisionEngine` (deterministic or LLM-backed, routed by `runtime/llm/router.py`) proposes the
@@ -258,7 +259,7 @@ artifacts, command policy and sandboxing — will be added in slices so the runt
   `tests/agent/test_real_executor_integration.py`.
 - Role 1 suites: `tests/agent`, `decision`, `events`, `llm`, `planner`, `schemas`, `state`, `task`, `tools`,
   `verification`.
-- Baseline at time of writing: **411 passed, 5 skipped** (symlink-file and POSIX-mode tests skip when the OS does not allow
+- Baseline at time of writing: **483 passed, 5 skipped** (symlink-file and POSIX-mode tests skip when the OS does not allow
   them; a Windows directory-junction test covers the same escape). `pyproject.toml` `testpaths` limits default collection to `tests/`
   and `execution/tests/`; the deliberately broken `fixtures/repositories/calculator` test (which the demo fixes)
   is not collected.
