@@ -4,9 +4,9 @@ Execution, Git, worktrees, command running, sandboxing and testing.
 
 - **Status snapshot date:** 2026-10-23
 - **Branch audited:** `execution` (HEAD `a91605f`)
-- **Test baseline:** `python -m pytest -q` → 764 passed, 6 skipped (symlink/POSIX-mode tests and the real-container test skip where unavailable), 0 failed (default `testpaths` now exclude the
+- **Test baseline:** `python -m pytest -q` → 915 passed, 6 skipped (symlink/POSIX-mode tests and the real-container test skip where unavailable), 0 failed (default `testpaths` now exclude the
   intentionally failing `fixtures/` repo). Before the first slices it was 202 passed + 1 fixture failure.
-- **Progress log:** slices A1–A3, B1–B2, C1–C4 (Phase 2 filesystem) C5–C9 (Phase 3 patches) D1–D3, D9 (Phase 4 Git) D4–D8, D11 (Phase 5 worktrees) E1–E5 (Phase 6 commands) and H1–H6 (Phase 7 security) are done; B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
+- **Progress log:** slices A1–A3, B1–B2, C1–C4 (Phase 2 filesystem) C5–C9 (Phase 3 patches) D1–D3, D9 (Phase 4 Git) D4–D8, D11 (Phase 5 worktrees) E1–E5 (Phase 6 commands) H1–H6 (Phase 7 security) and F1–F6 (Phase 8 tests) are done; B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
 
 Companion documents: [ARCHITECTURE.md](ARCHITECTURE.md) (how the system fits together),
 [API_CONTRACTS.md](API_CONTRACTS.md) (baseline runtime ↔ execution contract),
@@ -64,14 +64,14 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 | 5 | Worktrees & task isolation | 🟡 PARTIAL | Registry, base commits, safe/backed-up removal, locking, reconciliation, gateway tools done; retention policy and live-owner leases pending |
 | 6 | Controlled command execution | 🟡 PARTIAL | Hardened runner (env policy, output bounds, verified tree kill, cancel, limits), command policy and `shell.run` done; POSIX paths unverified, no sandbox yet |
 | 7 | Sandboxing & execution security | 🟡 PARTIAL | Threat model, path/secret hardening, levels & profiles, container backend with fail-closed enforcement done; **real-container proof pending** |
-| 8 | Test discovery & execution | 🟡 PARTIAL | Hardcoded `python -m pytest`; no discovery or report parsing |
-| 9 | Deterministic verification evidence | 🟡 PARTIAL | Role 1 verifier exists; not tied to code version/artifacts |
+| 8 | Test discovery & execution | 🟡 PARTIAL | Discovery, 7 adapters, JUnit/JSON/console parsing, normalized statuses, targeted runs, version fingerprint + freshness done; only Python adapters run against real tools |
+| 9 | Deterministic verification evidence | 🟡 PARTIAL | Test evidence now carries its source version and a freshness check; check kinds, authoritative status and Role 1 hand-off pending |
 | 10 | Artifacts, retention & audit | ⬜ PENDING | Only runtime events exist |
 | 11 | Concurrency, interruption & recovery | ⬜ PENDING | — |
 | 12 | Cross-role integration | 🟡 PARTIAL | Role 1 wired in; Role 2 and Role 3 pending |
 | 13 | Security, testing & performance qualification | 🟡 PARTIAL | Unit/integration tests only |
 
-**Role 4 completion checklist: 9 ✅ done · 12 🟡 partial · 5 ⬜ pending (of 26)** (an item flips only when its full acceptance criterion is met). See [Section 4](#4-role-4-completion-checklist).
+**Role 4 completion checklist: 11 ✅ done · 12 🟡 partial · 3 ⬜ pending (of 26)** (an item flips only when its full acceptance criterion is met). See [Section 4](#4-role-4-completion-checklist).
 
 ---
 
@@ -219,18 +219,17 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 
 *Completion criterion: appropriate tests run; genuine failures are distinguished from infrastructure errors; results are tied to the code version tested.*
 
-- ✅ `run_tests(worktree)` runs `python -m pytest` with a 30 s timeout via the command runner (`execution/testing/runner.py`); tests in `test_test_runner.py`.
-- ✅ `TestRunResult` schema (`status`, `passed`, `failed`) exists in `runtime/schemas/execution.py` (not yet populated by the runner).
-- ⬜ Test discovery (pytest/unittest, npm scripts, Maven/Gradle) from repo config, not a hardcoded command.
-- ⬜ Use the workspace's own interpreter/venv rather than whatever `python` is on PATH.
-- ⬜ Machine-readable reports (JUnit XML / JSON) parsed into a normalized model; keep framework details.
-- ⬜ Counts for passed / failed / skipped / deselected; populate `TestRunResult`.
-- ⬜ Distinguish test failure vs collection/setup error vs timeout vs "could not start".
-- ⬜ Targeted tests vs full suite; report exactly which checks ran.
-- ⬜ Record command, workspace, source revision, start time, duration, artifact refs.
-- ⬜ Configurable timeout (30 s is fixed).
-- ⬜ Tests for setup failure, failing tests, skipped tests, timeouts, corrupted report.
-- 🟡 `execution/tests/runner.py` is an empty placeholder (and `execution/tests/` doubles as the test directory) — resolve the naming overlap with `execution/testing/`.
+- ✅ `test.run` is now a real test service (`execution/testing/service.py`): detect → build command → check it against the command policy → run in the hardened runner (and the sandbox when configured) → read results → normalized `RunReport`. The old `run_tests(worktree)` helper remains only for `execute_task`.
+- ✅ Discovery from what the repository documents, with the evidence recorded in `report.evidence`: pytest (`pytest.ini`, `[tool.pytest]`, `tox.ini`, `setup.cfg`, `conftest.py`, test files importing pytest, pytest in requirements), unittest-style tests, npm (`scripts.test`, runner guessed from it), Maven (`pom.xml`), Gradle (`build.gradle[.kts]`), Cargo (`Cargo.toml`), Go (`go.mod`). Several frameworks → the first in a fixed order runs and the others are listed in `report.notes`; `framework=` picks one. Vendored directories are not scanned.
+- ✅ Machine-readable results: JUnit XML (pytest `--junitxml`, Maven Surefire, Gradle — only files newer than the run, so a stale report is never read) and `go test -json`. Counts come from the individual cases, not from totals the file claims; a report that disagrees with itself cannot produce a PASS. DOCTYPE/ENTITY declarations are refused (no entity-expansion attacks) and size is bounded. Console summaries (pytest, unittest, Jest/Vitest/Mocha, Cargo) are the fallback and cross-check (deselected counts only exist there).
+- ✅ Normalized model (`RunReport`): framework, command, scope (`full`/`targeted`) and targets, status, exit code, start/finish/duration, counts (`total/passed/failed/errors/skipped/deselected`), up to 200 cases (failures first), report source/files/problems, evidence/notes, process info and output-file references. `to_runtime_result()` fills Role 1's existing `TestRunResult`.
+- ✅ Statuses distinguish what happened: `PASSED`, `FAILED` (tests failed), `ERROR` (collection/setup errors, crashes, a non-zero exit although every reported test passed, an inconsistent report), `NO_TESTS` (nothing collected — or every test skipped, since nothing was verified), `UNVERIFIED` (exit 0 but no readable results), `TIMEOUT`, `CANCELLED`, `NOT_RUN` (no framework, refused by policy, sandbox missing, program not installed, could not start). Exit 0 alone is never a PASS.
+- ✅ Targeted vs full: `targets` (pytest paths/node ids, unittest dotted names, Maven `Class#method`, Gradle `--tests` patterns, Cargo filters, Go packages, npm paths) and pytest `keyword`, all validated (no options, nothing outside the workspace, nonexistent paths refused). Each report says `scope`, so a passing target can never be mistaken for a passing suite.
+- ✅ Version association: `workspace_version` = content fingerprint of the workspace (committed, modified and untracked files; generated clutter such as bytecode, caches, `node_modules` and our own report files excluded) plus `head`. Recorded before the run; `modified_during_run` flags tests that change the tree. New tool `test.freshness` (`TEST_FRESHNESS`, read-only) answers whether a result is still current.
+- ✅ Configurable timeout (`timeout_seconds`, ≤600).
+- ✅ Tests: `test_test_parsers.py` (106) and `test_test_service.py` (45) — real pytest and unittest runs for pass, fail, skip, collection error, syntax error, no tests, all skipped, targeted/keyword, timeout, cancellation, corrupted and missing reports (via a conftest that sabotages the file), workspace-modifying tests, stale/fresh results, plus fixtures for every other parser.
+- 🟡 **Only the Python adapters were exercised against real tools** (this machine has no Node, Maven, Gradle, Cargo or Go). Their commands, target validation, policy compatibility and parsers are tested against sample output only; expect to adjust them on first contact with real projects. Maven/Gradle need dependencies, which the network-less sandbox cannot download.
+- 🟡 Not covered: using the *project's* interpreter/venv (the controlled `PATH`'s `python` runs the tests, so a project that needs its own virtualenv must provide it on `PATH`), Jest/Vitest JUnit output (console summary only), the Gradle wrapper, parallel/sharded runs, flaky-test retries, coverage, raw report files as retained artifacts (Phase 10).
 
 ### Phase 9 — Deterministic verification and recovery evidence 🟡 PARTIAL
 
@@ -240,10 +239,10 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 - ✅ `execute_task` produces real patch + test + diff evidence and emits `VERIFICATION_*` events.
 - ⬜ Supported check kinds: tests, build, lint, type-check, file exists, content condition, diff contains change, no prohibited paths modified.
 - ⬜ Evidence includes the underlying command result and artifact references.
-- ⬜ Associate each result with the workspace revision/tree hash; mark results **stale** after later edits.
+- ✅ (tests) Each test result carries `workspace_version`; `test.freshness` reports staleness after later edits. Other check kinds are not built yet.
 - ⬜ Agree one authoritative verification status with Role 1 (avoid two competing systems).
 - ⬜ Failure evidence sufficient for inspect / retrieve more output / targeted retest / modify patch / replan / stop.
-- ⬜ Tests for stale and inconsistent outcomes.
+- 🟡 Tests for stale results and inconsistent reports exist for test runs (`test_test_service.py`); not yet for other check kinds.
 
 ### Phase 10 — Execution artifacts, output retention and auditability ⬜ PENDING
 
@@ -372,8 +371,9 @@ sandbox → tests → verification → recovery/artifacts → integration/securi
 - E6. `SECURITY_MODEL.md` + threat model. E7. Isolation strategy decision (ADR). E8. First isolation layer (limits/env/network) + sandbox tests.
 
 **Slice group F — Tests & verification**
-- F1. Detect pytest/unittest from config; use workspace interpreter. F2. JUnit XML parse → populate `TestRunResult`. F3. Targeted runs. F4. npm/Maven/Gradle adapters (one per slice).
-- F5. Record workspace revision on each test run; F6. staleness check; F7. check kinds (build/lint/typecheck/file/diff/prohibited-path); F8. hand evidence to Role 1's verifier; route `CommandVerifier` through the runner.
+- ✅ F1. Detect pytest/unittest from config (project interpreter/venv still ⬜). ✅ F2. JUnit XML parse → `RunReport` (+ `to_runtime_result`). ✅ F3. Targeted runs. ✅ F4. npm/Maven/Gradle/Cargo/Go adapters (unverified against real tools).
+- ⬜ F4b. Run the non-Python adapters against real projects and fix what breaks. ⬜ F4c. Use the project's own interpreter/venv.
+- ✅ F5. Record workspace revision on each test run; ✅ F6. staleness check (`test.freshness`); F7. check kinds (build/lint/typecheck/file/diff/prohibited-path); F8. hand evidence to Role 1's verifier; route `CommandVerifier` through the runner.
 
 **Slice group G — Artifacts, recovery, integration**
 - G1. Artifact store + bounded results. G2. Redaction. G3. Execution records + running-ops table. G4. Reconcile on restart. G5. Failure-injection suite.
@@ -409,10 +409,10 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 - [~] Implement and test the selected isolation strategy — container backend, profiles and fail-closed enforcement built and tested against a stand-in engine; not yet run against a real daemon
 
 **E. Testing and verification**
-- [~] Implement test discovery and runner adapters — hardcoded pytest
-- [ ] Normalize machine-readable test results
-- [ ] Associate results with workspace versions
-- [~] Provide actual verification evidence to Role 1 — raw results via `execute_task` / verifier; no versioning
+- [~] Implement test discovery and runner adapters — 7 adapters built; only pytest/unittest proven against real tools
+- [x] Normalize machine-readable test results — JUnit XML / `go test -json` / console into `RunReport` and Role 1's `TestRunResult`
+- [x] Associate results with workspace versions — content fingerprint + `test.freshness`
+- [~] Provide actual verification evidence to Role 1 — versioned `RunReport` from `test.run`; hand-off to Role 1's verifier and other check kinds pending
 
 **F. Artifacts and recovery**
 - [ ] Add bounded output and artifact references
@@ -425,7 +425,7 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 - [ ] Coordinate index refreshes and worktrees with Role 3
 - [~] Complete security, failure-injection and performance tests — unit/integration only
 
-`[x]` done · `[~]` partial · `[ ]` pending — **9 / 12 / 5** of 26.
+`[x]` done · `[~]` partial · `[ ]` pending — **11 / 12 / 3** of 26.
 
 ---
 

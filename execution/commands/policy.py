@@ -262,7 +262,7 @@ def _eslint_matcher(args: list[str]) -> Match | str | None:
 
 _MVN_GOALS = {"test", "verify", "compile", "test-compile", "validate", "clean"}
 _MVN_FLAGS = {"-q", "-B", "--batch-mode", "-e", "-o", "--offline", "-ntp"}
-_MVN_PROP = re.compile(r"^-D[\w.\-]+(=[\w.\-]*)?$")
+_MVN_PROP = re.compile(r"^-D[\w.\-]+(=[\w.\-#*,$]*)?$")
 
 
 def _mvn_matcher(args: list[str]) -> Match | str | None:
@@ -284,8 +284,15 @@ def _mvn_matcher(args: list[str]) -> Match | str | None:
     return Match("test" if "test" in goals or "verify" in goals else "build")
 
 
+_CARGO_DENIED = ("--config", "-Z", "--manifest-path", "--target-dir", "--frozen-lockfile")
+
+
 def _cargo_matcher(args: list[str]) -> Match | str | None:
     sub = args[0] if args else ""
+
+    for arg in args:
+        if arg.startswith(_CARGO_DENIED):
+            return f"'{arg}' can run arbitrary programs or move outputs; not allowed"
 
     if sub in ("test", "check", "clippy", "build", "doc"):
         return Match("test" if sub == "test" else "build")
@@ -299,8 +306,17 @@ def _cargo_matcher(args: list[str]) -> Match | str | None:
     return "only cargo test|check|clippy|build|doc|fmt --check is allowed"
 
 
+_GO_DENIED = ("-exec", "-toolexec", "-overlay", "-modfile", "-C", "-pgo")
+
+
 def _go_matcher(args: list[str]) -> Match | str | None:
     sub = args[0] if args else ""
+
+    for arg in args:
+        name = arg.lstrip("-").split("=", 1)[0]
+
+        if arg.startswith("-") and f"-{name}" in _GO_DENIED:
+            return f"'{arg}' runs other programs or changes the build; not allowed"
 
     if sub in ("test", "vet", "build"):
         return Match("test" if sub == "test" else "build")
@@ -309,6 +325,50 @@ def _go_matcher(args: list[str]) -> Match | str | None:
         return Match("inspect")
 
     return "only go test|vet|build is allowed"
+
+
+_GRADLE_TASKS = {
+    "test", "check", "build", "assemble", "classes", "testClasses", "clean",
+    "compileJava", "compileKotlin", "compileTestJava", "compileTestKotlin",
+}
+_GRADLE_FLAGS = {
+    "-q", "--quiet", "-i", "--info", "--stacktrace", "--console=plain",
+    "--no-daemon", "--offline", "--continue", "--rerun-tasks",
+}
+_GRADLE_PATTERN = re.compile(r"^[\w.*$#]+$")
+
+
+def _gradle_matcher(args: list[str]) -> Match | str | None:
+    if args in (["--version"], ["-v"]):
+        return Match("inspect")
+
+    tasks: list[str] = []
+    i = 0
+
+    while i < len(args):
+        arg = args[i]
+
+        if arg == "--tests":
+            if i + 1 >= len(args) or not _GRADLE_PATTERN.match(args[i + 1]):
+                return "--tests needs a pattern like pkg.Class.method"
+
+            i += 2
+            continue
+
+        if arg.startswith("-"):
+            if arg not in _GRADLE_FLAGS:
+                return f"Gradle option '{arg}' is not allowed"
+        elif arg in _GRADLE_TASKS:
+            tasks.append(arg)
+        else:
+            return f"Gradle task '{arg}' is not allowed"
+
+        i += 1
+
+    if not tasks:
+        return "a Gradle task is required"
+
+    return Match("test" if "test" in tasks or "check" in tasks else "build")
 
 
 # ---------------------------------------------------------- path arguments
@@ -466,6 +526,7 @@ class CommandPolicy:
                 CommandRule("tsc", frozenset({"tsc"}), _tsc_matcher),
                 CommandRule("eslint", frozenset({"eslint"}), _eslint_matcher),
                 CommandRule("maven", frozenset({"mvn", "mvnw"}), _mvn_matcher),
+                CommandRule("gradle", frozenset({"gradle"}), _gradle_matcher),
                 CommandRule("cargo", frozenset({"cargo"}), _cargo_matcher),
                 CommandRule("go", frozenset({"go"}), _go_matcher),
             ]

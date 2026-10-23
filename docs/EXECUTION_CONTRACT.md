@@ -29,7 +29,8 @@ The workspace is trusted gateway context (`ToolContext`); it is never taken from
 | `patch.validate` | `VALIDATE_PATCH` | `fs.read` | yes | `{patch, base?, reverse?}`; checks a unified diff against the workspace, writes nothing; see §2.2 |
 | `patch.apply` | `APPLY_PATCH` | `fs.write` (+ `fs.delete` to delete files) | no | `{patch, base?, reverse?}`; see §2.2 |
 | `repo.write` | `WRITE` | `fs.write` | no | `{path, content, expected_sha256?}`; see §2.1 |
-| `test.run` | `RUN_TEST` | `test.run` | no | `python -m pytest` through the hardened runner |
+| `test.run` | `RUN_TEST` | `test.run` | no | `{framework='auto', targets?, keyword?, timeout_seconds?}`; detects the framework, runs the suite or targets, returns a normalized report; see §2.7 |
+| `test.freshness` | `TEST_FRESHNESS` | `fs.read` | yes | `{fingerprint}`; is an earlier result's `workspace_version` still current? |
 | `git.status` | `GIT_STATUS` | `git.read` | yes | `{max_entries?}`; structured branch/staged/unstaged/untracked/conflicted/state |
 | `git.diff` | `GIT_DIFF` | `git.read` | yes | `{mode='unstaged'\|'staged'\|'base', base?, paths?, include_untracked=true, max_bytes?, context?}`; stdout is the diff text, `data` has base, files, stats; see §2.3 |
 | `git.info` | `GIT_INFO` | `git.read` | yes | `{max_branches?, max_commits?}`; identity, HEAD, branches, recent commits, relevant config |
@@ -98,6 +99,25 @@ canonical id. Aligning Role 1's registry names is an open item.
 - **Process tree:** on timeout, cancel and orphaned children the whole tree is killed. `data.process_tree` = `{killed, mechanism: job_object|process_group|taskkill, leftover, orphans?}`; `leftover > 0` means something could not be stopped and is also written into the error message.
 - **Cancellation:** `gateway.cancel(action_id)`, `cancel_all()`, `await shutdown()` and cancelling the awaiting asyncio task all stop running commands. The gateway timeout does the same before returning `TIMEOUT`.
 
+### 2.7 Test semantics (`test.run`, `test.freshness`)
+
+- **Success means every test passed.** `success=true` only for `data.status == "PASSED"` (≥1 test ran, none failed or errored, exit code agrees). Everything else is a failure whose precise meaning is in `data.status`:
+
+| `data.status` | Meaning | `error_category` |
+| ------------- | ------- | ---------------- |
+| `FAILED` | one or more tests failed | `TEST_FAILURE` |
+| `ERROR` | tests could not run properly: collection/setup error, crash, inconsistent report, non-zero exit despite all-pass | `TEST_FAILURE` |
+| `NO_TESTS` | nothing collected, or everything skipped (nothing verified) | `TEST_FAILURE` |
+| `UNVERIFIED` | exit 0 but no readable results | `TEST_FAILURE` |
+| `TIMEOUT` / `CANCELLED` | stopped by the timeout / by cancellation (process tree killed) | `TIMEOUT` / `CANCELLED` |
+| `NOT_RUN` | never started: no framework (`INVALID_ARGUMENTS`), policy or sandbox refusal (`PERMISSION_DENIED`), program not installed or could not start (`PROCESS_FAILURE`) | see left |
+
+- **`data` is the `RunReport`:** `framework`, `command`, `scope` (`full`/`targeted`) + `targets`/`keyword`, `counts` (`total/passed/failed/errors/skipped/deselected`, `null` when no results were readable), `cases` (≤200, failures first; `cases_truncated`), `report_source` (`junit`/`json`/`console`/`none`) + `report_files` + `report_problem`, `evidence` (why this framework), `notes`, `exit_code`, `started_at/finished_at/duration_ms`, `summary`, `process_tree`, `sandboxed`, and the version tested.
+- **Version:** `workspace_version = {kind: git|files, head, fingerprint, file_count}`. The fingerprint hashes the content of every committed, modified and untracked file that is not git-ignored, excluding generated clutter (bytecode, caches, `node_modules`, report files). It describes the state *before* the run; `modified_during_run` is true if the tests changed the tree. After any edit the old result is stale: `test.freshness {fingerprint}` returns `data.current`.
+- **Targets** are validated per framework and never start with `-`; paths must exist inside the workspace. A targeted run is labelled `scope="targeted"` and must not be read as evidence about the full suite.
+- **Evidence order:** structured report → console summary → exit code. Exit code alone is never PASSED. A JUnit file is never reused across runs (pytest gets a unique file; Maven/Gradle reports older than the run are ignored). DOCTYPE/ENTITY in a report is refused.
+- **Commands are checked by the command policy** before they run (defense in depth), and run inside the sandbox when the gateway has one.
+
 Default granted capabilities: `fs.read`, `fs.write`, `git.read`, `test.run`. Not granted by default: `fs.delete`, `fs.read_secrets`, `git.write`, `git.discard`, `worktree.manage`, `worktree.discard`, `shell.run`, `shell.network`.
 
 ### 2.6 Security semantics (details in [SECURITY_MODEL.md](SECURITY_MODEL.md))
@@ -164,5 +184,5 @@ See [EXECUTION_PLAN.md](EXECUTION_PLAN.md) for the scheduled work.
 4. Add gateway-level tests for success, invalid arguments, denied capability and each error category.
 
 `ActionType` in `runtime/schemas/action.py` gates which action types exist; new ones need a (backward-compatible) schema
-change. `LIST_DIR`, `FILE_INFO`, `WRITE`, `VALIDATE_PATCH`, `APPLY_PATCH`, `GIT_STATUS`, `GIT_INFO`, `GIT_STAGE`, `GIT_COMMIT`, `GIT_BRANCH`, `GIT_DISCARD`, `WORKTREE_CREATE`, `WORKTREE_LIST`, `WORKTREE_REMOVE` and `WORKTREE_RECONCILE` were added that way. They are **not yet** in Role 1's `ToolRegistry.default()`,
+change. `LIST_DIR`, `FILE_INFO`, `WRITE`, `VALIDATE_PATCH`, `APPLY_PATCH`, `GIT_STATUS`, `GIT_INFO`, `GIT_STAGE`, `GIT_COMMIT`, `GIT_BRANCH`, `GIT_DISCARD`, `WORKTREE_CREATE`, `WORKTREE_LIST`, `WORKTREE_REMOVE`, `WORKTREE_RECONCILE` and `TEST_FRESHNESS` were added that way. They are **not yet** in Role 1's `ToolRegistry.default()`,
 so the planner cannot offer them until Role 1 registers them.

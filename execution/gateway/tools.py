@@ -1,5 +1,9 @@
 from execution.gateway.capabilities import DEFAULT_CAPABILITIES
-from execution.gateway.command_tools import RunCommandTool, RunTestTool
+from execution.gateway.command_tools import (
+    RunCommandTool,
+    RunTestTool,
+    TestFreshnessTool,
+)
 from execution.gateway.fs_tools import (
     EditTool,
     FileInfoTool,
@@ -40,6 +44,7 @@ def default_tools() -> list[Tool]:
         PatchValidateTool(),
         PatchApplyTool(),
         RunTestTool(),
+        TestFreshnessTool(),
         GitStatusTool(),
         GitDiffTool(),
         GitInfoTool(),

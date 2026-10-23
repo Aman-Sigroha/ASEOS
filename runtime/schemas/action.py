@@ -25,6 +25,7 @@ ActionType = Literal[
     "WORKTREE_LIST",
     "WORKTREE_REMOVE",
     "WORKTREE_RECONCILE",
+    "TEST_FRESHNESS",
 ]
 
 

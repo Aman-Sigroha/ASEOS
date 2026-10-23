@@ -61,6 +61,7 @@ EXPECTED_LEVELS = {
     "git.diff": "READ_ONLY",
     "git.info": "READ_ONLY",
     "git.worktree.list": "READ_ONLY",
+    "test.freshness": "READ_ONLY",
     "patch.replace": "LOW_RISK_MUTATION",
     "repo.write": "LOW_RISK_MUTATION",
     "patch.apply": "LOW_RISK_MUTATION",

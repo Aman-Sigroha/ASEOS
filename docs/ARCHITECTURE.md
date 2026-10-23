@@ -82,7 +82,9 @@ ASEOS/
 │   ├── sandbox/              base.py (Sandbox interface), container.py (Docker/Podman backend)
 │   ├── commands/             process.py (hardened runner: tree kill, limits, cancel), env.py, capture.py,
 │   │                         policy.py (default-deny command policy), runner.py (trusted-caller wrapper)
-│   ├── testing/runner.py     run_tests(worktree) → python -m pytest
+│   ├── testing/              service.py (detect → run → normalize), adapters.py (pytest, unittest, npm, Maven,
+│   │                         Gradle, Cargo, Go), junit.py, console.py, model.py (RunReport); runner.py = legacy helper
+│   ├── versioning.py         workspace_version(): content fingerprint used to date test results
 │   ├── tests/                unit tests for the execution modules (+ empty runner.py placeholder)
 │   ├── worktrees/            manager.py (lifecycle), store.py (registry + repo lock), record.py, ids.py
 │   └── demo.py               `python -m execution.demo`
@@ -145,7 +147,8 @@ Two implementations exist:
 | `EDIT` (`patch.replace`) | Legacy `apply_patch(workspace, payload)` with `{file, old, new}` | Path containment; target must be non-empty and match exactly once; protected paths denied |
 | `VALIDATE_PATCH` (`patch.validate`) | Checks a unified diff against the workspace; writes nothing | Containment, protected paths, size limits, base hashes, hunk context |
 | `APPLY_PATCH` (`patch.apply`) | Applies a unified diff (create/modify/delete, multi-file); validates all files first, atomic per file, rolls back on failure, reports the diff actually produced; `reverse=true` undoes one | As above; deleting needs the `fs.delete` capability (not granted by default) |
-| `RUN_TEST` (`test.run`) | `python -m pytest` through the hardened runner, 120 s | Fixed command, no caller-supplied argv; scrubbed env, tree kill, bounded output |
+| `RUN_TEST` (`test.run`) | Detects the framework, runs the suite or validated targets, returns a normalized `RunReport` with the tested version | Commands built by us (not the model) and checked by the policy; scrubbed env, tree kill, bounded output, sandbox when configured |
+| `TEST_FRESHNESS` (`test.freshness`) | Is an earlier result's workspace fingerprint still current? | Read-only |
 | `GIT_DIFF` (`git.diff`) | `git diff --` via the command runner, 10 s | Fixed argv |
 | `RUN_COMMAND` (`shell.run`) | One allowed program (argv, never a shell) under the command policy | Needs `shell.run` (not granted by default); default-deny policy, path arguments confined to the workspace, scrubbed env, bounded output, tree kill on timeout/cancel |
 
@@ -263,7 +266,7 @@ artifacts, command policy and sandboxing — will be added in slices so the runt
   `tests/agent/test_real_executor_integration.py`.
 - Role 1 suites: `tests/agent`, `decision`, `events`, `llm`, `planner`, `schemas`, `state`, `task`, `tools`,
   `verification`.
-- Baseline at time of writing: **764 passed, 6 skipped** (symlink-file and POSIX-mode tests skip when the OS does not allow
+- Baseline at time of writing: **915 passed, 6 skipped** (symlink-file and POSIX-mode tests skip when the OS does not allow
   them; a Windows directory-junction test covers the same escape). `pyproject.toml` `testpaths` limits default collection to `tests/`
   and `execution/tests/`; the deliberately broken `fixtures/repositories/calculator` test (which the demo fixes)
   is not collected.

@@ -1,4 +1,5 @@
 import shlex
+from typing import Literal
 from pathlib import Path
 from typing import Any
 
@@ -7,7 +8,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from execution.commands.process import ProcessLimits, ProcessResult, run_process
 from execution.commands.policy import CAP_SHELL_NETWORK, CommandPolicy, PolicyDecision
 from execution.security.levels import ExecutionLevel
-from execution.gateway.capabilities import CAP_SHELL_RUN, CAP_TEST_RUN
+from execution.testing.adapters import TargetError
+from execution.testing.service import run_test_suite
+from execution.versioning import workspace_version
+from execution.gateway.capabilities import CAP_FS_READ, CAP_SHELL_RUN, CAP_TEST_RUN
 from execution.security.levels import ExecutionLevel
 from execution.gateway.tool import (
     Tool,
@@ -289,32 +293,138 @@ class RunCommandTool(Tool):
 # -------------------------------------------------------------- test.run
 
 
-class NoArgs(BaseModel):
+class TestRunArgs(BaseModel):
+    __test__ = False
     model_config = ConfigDict(extra="ignore")
+
+    framework: Literal[
+        "auto", "pytest", "unittest", "npm", "maven", "gradle", "cargo", "go"
+    ] = "auto"
+    targets: list[str] = Field(default_factory=list)
+    keyword: str | None = None
+    timeout_seconds: float | None = Field(default=None, gt=0)
+
+
+_STATUS_CATEGORY = {
+    "FAILED": "TEST_FAILURE",
+    "ERROR": "TEST_FAILURE",
+    "NO_TESTS": "TEST_FAILURE",
+    "UNVERIFIED": "TEST_FAILURE",
+    "TIMEOUT": "TIMEOUT",
+    "CANCELLED": "CANCELLED",
+}
+_NOT_RUN_CATEGORY = {
+    "no_framework": "INVALID_ARGUMENTS",
+    "policy": "PERMISSION_DENIED",
+    "sandbox": "PERMISSION_DENIED",
+}
 
 
 class RunTestTool(Tool):
+    __test__ = False
     spec = ToolSpec(
         name="test.run",
         level=ExecutionLevel.DEV_EXECUTION,
         action_type="RUN_TEST",
-        description="Run the workspace test suite (python -m pytest).",
-        args_model=NoArgs,
+        description=(
+            "Detect the project's test framework (pytest, unittest, npm, "
+            "Maven, Gradle, Cargo, Go) and run the full suite or specific "
+            "targets. Returns a normalized report: status, passed/failed/"
+            "skipped counts, failing cases, and the exact workspace version "
+            "that was tested. Success means every test passed; check "
+            "data.status to tell failing tests from errors, no tests, "
+            "and a command that could not start."
+        ),
+        args_model=TestRunArgs,
         capabilities=frozenset({CAP_TEST_RUN}),
         read_only=False,
-        timeout_seconds=150,
+        timeout_seconds=660,
     )
 
-    def run(self, context: ToolContext, args: NoArgs) -> ToolOutput:
+    def __init__(self, policy: CommandPolicy | None = None) -> None:
+        self.policy = policy or CommandPolicy.default()
+
+    def run(self, context: ToolContext, args: TestRunArgs) -> ToolOutput:
         sandbox = resolve_sandbox(context)
-        result = run_process(
-            ["python", "-m", "pytest"],
-            context.workspace,
-            limits=ProcessLimits(timeout_seconds=120),
-            cancel=context.cancel,
-            workspace=context.workspace,
-            sandbox=sandbox,
+
+        try:
+            report, process = run_test_suite(
+                context.workspace,
+                framework=args.framework,
+                targets=args.targets,
+                keyword=args.keyword,
+                timeout=self.policy.clamp_timeout(args.timeout_seconds or 120.0),
+                cancel=context.cancel,
+                sandbox=sandbox,
+                policy=self.policy,
+                capabilities=context.capabilities,
+            )
+        except TargetError as exc:
+            raise ToolError("INVALID_ARGUMENTS", str(exc)) from exc
+
+        data = report.model_dump()
+        data["process_tree"] = process.tree if process else {}
+        data["sandboxed"] = bool(process and "sandbox" in process.tree)
+        artifacts = _artifacts(process) if process else []
+        stdout = process.stdout if process else ""
+        stderr = process.stderr if process else ""
+
+        if report.status == "PASSED":
+            return ToolOutput(
+                stdout=stdout,
+                stderr=stderr,
+                exit_code=report.exit_code,
+                data=data,
+                truncated=bool(process and process.truncated),
+                artifacts=artifacts,
+            )
+
+        if report.status == "NOT_RUN":
+            category = _NOT_RUN_CATEGORY.get(report.not_run_kind or "", "PROCESS_FAILURE")
+        else:
+            category = _STATUS_CATEGORY.get(report.status, "TEST_FAILURE")
+
+        raise ToolError(
+            category,  # type: ignore[arg-type]
+            report.summary,
+            stdout=stdout,
+            stderr=stderr or report.summary,
+            exit_code=report.exit_code,
+            data=data,
+            artifacts=artifacts,
         )
-        return to_output(
-            result, context.workspace, failure_category="TEST_FAILURE"
+
+
+class TestFreshnessArgs(BaseModel):
+    __test__ = False
+    model_config = ConfigDict(extra="ignore")
+
+    fingerprint: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+
+
+class TestFreshnessTool(Tool):
+    __test__ = False
+    spec = ToolSpec(
+        name="test.freshness",
+        level=ExecutionLevel.READ_ONLY,
+        action_type="TEST_FRESHNESS",
+        description=(
+            "Tell whether a test result is still current: compares the "
+            "workspace_version.fingerprint of an earlier test.run with the "
+            "workspace as it is now. If the code changed, the old result is "
+            "stale and the tests must be run again."
+        ),
+        args_model=TestFreshnessArgs,
+        capabilities=frozenset({CAP_FS_READ}),
+        read_only=True,
+        idempotent=True,
+        timeout_seconds=120,
+    )
+
+    def run(self, context: ToolContext, args: TestFreshnessArgs) -> ToolOutput:
+        now = workspace_version(context.workspace)
+        current = now["fingerprint"] == args.fingerprint.lower()
+        return ToolOutput(
+            stdout="current" if current else "stale: the workspace changed since that run",
+            data={"current": current, "workspace_version": now},
         )
