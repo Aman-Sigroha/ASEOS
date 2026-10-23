@@ -4,9 +4,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from execution.gateway.capabilities import (
     CAP_FS_DELETE,
+    CAP_FS_READ_SECRETS,
     CAP_FS_READ,
     CAP_FS_WRITE,
 )
+from execution.security.levels import ExecutionLevel
 from execution.gateway.tool import (
     Tool,
     ToolContext,
@@ -38,6 +40,7 @@ class _PatchArgs(BaseModel):
 class PatchValidateTool(Tool):
     spec = ToolSpec(
         name="patch.validate",
+        level=ExecutionLevel.READ_ONLY,
         action_type="VALIDATE_PATCH",
         description=(
             "Check a unified diff against the workspace without changing "
@@ -57,6 +60,7 @@ class PatchValidateTool(Tool):
             base=args.base,
             reverse=args.reverse,
             allow_delete=CAP_FS_DELETE in context.capabilities,
+            allow_secrets=CAP_FS_READ_SECRETS in context.capabilities,
         )
         data = describe_plan(plan)
         data["action_id"] = context.action_id
@@ -74,6 +78,7 @@ class PatchApplyTool(Tool):
 
     spec = ToolSpec(
         name="patch.apply",
+        level=ExecutionLevel.LOW_RISK_MUTATION,
         action_type="APPLY_PATCH",
         description=(
             "Apply a unified diff (create/modify/delete, multiple files). "
@@ -93,6 +98,7 @@ class PatchApplyTool(Tool):
             base=args.base,
             reverse=args.reverse,
             allow_delete=CAP_FS_DELETE in context.capabilities,
+            allow_secrets=CAP_FS_READ_SECRETS in context.capabilities,
         )
         data = apply_plan(plan, action_id=context.action_id)
         summary = ", ".join(f"{f['action']} {f['path']}" for f in data["files"])

@@ -343,6 +343,8 @@ def run_process(
     cancel: threading.Event | None = None,
     log_dir: Path | None = None,
     workspace: Path | None = None,
+    sandbox: Any = None,
+    network: bool = False,
 ) -> ProcessResult:
     limits = limits or ProcessLimits()
     started = time.perf_counter()
@@ -374,6 +376,8 @@ def run_process(
 
     temp_dir = Path(tempfile.mkdtemp(prefix="aseos-run-"))
     job = None
+    prepared = None
+    needs_cleanup = True  # until the sandboxed program ended by itself
     proc: subprocess.Popen | None = None
     captures: list[BoundedCapture] = []
 
@@ -383,20 +387,46 @@ def run_process(
         except EnvironmentError_ as exc:
             return _fail("invalid_env", str(exc), request, started)
 
-        executable = _resolve_executable(argv[0], env)
+        popen_env = env
 
-        if executable is None:
-            return _fail("not_found", f"Executable not found: {argv[0]}", request, started)
+        if sandbox is not None:
+            usable, why = sandbox.availability()
 
-        command = [executable, *argv[1:]]
+            if not usable:
+                return _fail(
+                    "sandbox_unavailable", f"Sandbox unavailable: {why}", request, started
+                )
 
-        if executable.lower().endswith(_BATCH_SUFFIXES) and _unsafe_batch_arguments(command):
-            return _fail(
-                "unsafe_argument",
-                "Arguments contain characters that are unsafe for a batch file",
-                request,
-                started,
-            )
+            try:
+                prepared = sandbox.prepare(
+                    list(argv),
+                    cwd=directory,
+                    workspace=Path(workspace).resolve() if workspace else directory,
+                    env=env,
+                    limits=limits,
+                    network=network,
+                    run_id=run_id,
+                )
+            except Exception as exc:  # SandboxError or a backend bug: fail closed
+                return _fail("sandbox_refused", f"Sandbox refused: {exc}", request, started)
+
+            command = prepared.command
+            popen_env = prepared.env
+        else:
+            executable = _resolve_executable(argv[0], env)
+
+            if executable is None:
+                return _fail("not_found", f"Executable not found: {argv[0]}", request, started)
+
+            command = [executable, *argv[1:]]
+
+            if executable.lower().endswith(_BATCH_SUFFIXES) and _unsafe_batch_arguments(command):
+                return _fail(
+                    "unsafe_argument",
+                    "Arguments contain characters that are unsafe for a batch file",
+                    request,
+                    started,
+                )
 
         popen_kwargs: dict[str, Any] = {}
 
@@ -417,7 +447,7 @@ def run_process(
             proc = subprocess.Popen(
                 command,
                 cwd=str(directory),
-                env=env,
+                env=popen_env,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -458,6 +488,9 @@ def run_process(
             reader.start()
 
         status, tree = _supervise(proc, job, limits, cancel)
+
+        if prepared is not None and status != "EXITED":
+            prepared.terminate()  # killing the client does not stop a container
         orphan = _orphan_check(proc, job, limits) if status == "EXITED" else None
 
         for reader in readers:
@@ -472,6 +505,9 @@ def run_process(
 
         tree = tree or orphan or {}
 
+        if prepared is not None:
+            tree = {**tree, "sandbox": prepared.description, **prepared.details}
+
         if orphan and tree is not orphan:
             tree = {**tree, "orphans_killed": True}
 
@@ -485,6 +521,7 @@ def run_process(
             capture.close()
 
         out, err = captures
+        needs_cleanup = final not in ("PASS", "FAIL")
         files = {
             name: str(capture.spool_path)
             for name, capture in zip(("stdout", "stderr"), captures)
@@ -508,6 +545,9 @@ def run_process(
             cwd=str(directory),
         )
     finally:
+        if prepared is not None and needs_cleanup:
+            prepared.cleanup()
+
         for capture in captures:
             capture.close()
 

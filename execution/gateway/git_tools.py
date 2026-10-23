@@ -3,10 +3,12 @@ from typing import Any, Callable, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from execution.gateway.capabilities import (
+    CAP_FS_READ_SECRETS,
     CAP_GIT_DISCARD,
     CAP_GIT_READ,
     CAP_GIT_WRITE,
 )
+from execution.security.levels import ExecutionLevel
 from execution.gateway.tool import (
     Tool,
     ToolContext,
@@ -57,6 +59,7 @@ class GitStatusArgs(_Args):
 class GitStatusTool(Tool):
     spec = ToolSpec(
         name="git.status",
+        level=ExecutionLevel.READ_ONLY,
         action_type="GIT_STATUS",
         description=(
             "Branch, upstream, staged/unstaged/untracked/conflicted paths "
@@ -102,6 +105,7 @@ class GitDiffArgs(_Args):
 class GitDiffTool(Tool):
     spec = ToolSpec(
         name="git.diff",
+        level=ExecutionLevel.READ_ONLY,
         action_type="GIT_DIFF",
         description=(
             "Diff with an explicit base: mode 'unstaged' (working tree vs "
@@ -127,6 +131,7 @@ class GitDiffTool(Tool):
                 include_untracked=args.include_untracked,
                 max_bytes=args.max_bytes,
                 context=args.context,
+                allow_secrets=CAP_FS_READ_SECRETS in context.capabilities,
             )
         )
         data = {k: v for k, v in result.items() if k != "diff"}
@@ -143,6 +148,7 @@ class GitInfoArgs(_Args):
 class GitInfoTool(Tool):
     spec = ToolSpec(
         name="git.info",
+        level=ExecutionLevel.READ_ONLY,
         action_type="GIT_INFO",
         description=(
             "Repository identity (root, linked-worktree flag), HEAD, current "
@@ -192,6 +198,7 @@ class GitStageArgs(_Args):
 class GitStageTool(Tool):
     spec = ToolSpec(
         name="git.stage",
+        level=ExecutionLevel.LOW_RISK_MUTATION,
         action_type="GIT_STAGE",
         description=(
             "Stage exactly the named files (no directories, globs or '.'). "
@@ -227,6 +234,7 @@ class GitCommitArgs(_Args):
 class GitCommitTool(Tool):
     spec = ToolSpec(
         name="git.commit",
+        level=ExecutionLevel.LOW_RISK_MUTATION,
         action_type="GIT_COMMIT",
         description=(
             "Commit exactly the named files. Fails if the index holds any "
@@ -258,6 +266,7 @@ class GitBranchArgs(_Args):
 class GitBranchTool(Tool):
     spec = ToolSpec(
         name="git.branch_create",
+        level=ExecutionLevel.LOW_RISK_MUTATION,
         action_type="GIT_BRANCH",
         description=(
             "Create a new branch at HEAD or `start_point`. Does not check "
@@ -290,6 +299,7 @@ class GitDiscardArgs(_Args):
 class GitDiscardTool(Tool):
     spec = ToolSpec(
         name="git.discard",
+        level=ExecutionLevel.ELEVATED,
         action_type="GIT_DISCARD",
         description=(
             "Discard unstaged edits to the named tracked files. Refuses "

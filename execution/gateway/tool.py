@@ -6,6 +6,13 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from execution.gateway.capabilities import CAP_FS_READ_SECRETS
+from execution.security.levels import ExecutionLevel
+from execution.security.paths import (
+    raw_path_problem,
+    read_denied_reason,
+    write_denied_reason,
+)
 from runtime.schemas.action import ActionType
 from runtime.schemas.execution import ArtifactRef, ErrorCategory
 
@@ -17,6 +24,12 @@ class ToolContext:
     workspace: Path
     action_id: str = ""
     capabilities: frozenset[str] = frozenset()
+    max_level: ExecutionLevel = ExecutionLevel.ELEVATED
+    # Isolation for programs a tool starts (see execution/sandbox). When
+    # `require_sandbox` is set and no usable sandbox exists, programs are
+    # refused instead of being run on the host.
+    sandbox: Any = None
+    require_sandbox: bool = False
     # Set by the gateway on cancellation, timeout or shutdown. Tools that
     # run for a while must watch it and stop (and clean up) promptly.
     cancel: threading.Event = field(default_factory=threading.Event)
@@ -34,6 +47,9 @@ class ToolSpec:
     read_only: bool
     idempotent: bool = False
     timeout_seconds: float = 120.0
+    # Unclassified tools default to the highest level so a restricted
+    # profile never runs something nobody has assessed.
+    level: ExecutionLevel = ExecutionLevel.ELEVATED
 
 
 @dataclass
@@ -84,9 +100,17 @@ class Tool(ABC):
 
 
 def resolve_in_workspace(workspace: Path, relative_path: str) -> Path:
-    """Resolve a workspace-relative path, rejecting escapes."""
+    """Resolve a workspace-relative path, rejecting malformed paths and escapes."""
 
-    candidate = (workspace / relative_path).resolve()
+    problem = raw_path_problem(relative_path)
+
+    if problem:
+        raise ToolError("INVALID_ARGUMENTS", f"Invalid path: {problem}")
+
+    try:
+        candidate = (workspace / relative_path).resolve()
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise ToolError("INVALID_ARGUMENTS", f"Invalid path: {exc}") from exc
 
     if not candidate.is_relative_to(workspace):
         raise ToolError(
@@ -96,28 +120,28 @@ def resolve_in_workspace(workspace: Path, relative_path: str) -> Path:
     return candidate
 
 
-_ENV_TEMPLATE_SUFFIXES = (".example", ".sample", ".template")
-
-
 def ensure_writable_path(workspace: Path, target: Path) -> None:
-    """Deny writes to Git internals and secret-bearing env files.
+    """Deny writes to Git internals, the managed worktree area and env files.
 
     `target` must already be resolved and inside `workspace`.
     """
 
-    relative = target.relative_to(workspace)
+    reason = write_denied_reason(target.relative_to(workspace))
 
-    if ".git" in relative.parts:
-        raise ToolError(
-            "PERMISSION_DENIED", "Writing inside .git is not permitted"
-        )
+    if reason:
+        raise ToolError("PERMISSION_DENIED", reason)
 
-    name = relative.name
 
-    if name == ".env" or (
-        name.startswith(".env.") and not name.endswith(_ENV_TEMPLATE_SUFFIXES)
-    ):
-        raise ToolError(
-            "PERMISSION_DENIED",
-            f"Writing to protected file '{name}' is not permitted",
-        )
+def ensure_readable_path(
+    workspace: Path,
+    target: Path,
+    capabilities: frozenset[str] | set[str] = frozenset(),
+) -> None:
+    """Deny showing the content of secret files and other tasks' worktrees."""
+
+    reason = read_denied_reason(
+        target.relative_to(workspace), CAP_FS_READ_SECRETS in capabilities
+    )
+
+    if reason:
+        raise ToolError("PERMISSION_DENIED", reason)

@@ -290,7 +290,10 @@ async def test_diff_treats_paths_literally_not_as_globs(gateway, repo):
 
     result = await run(gateway, "GIT_DIFF", {"paths": ["*.txt"]})
 
-    assert result.data["changed_files"] == []
+    if os.name == "nt":  # '*' is not a legal file-name character there
+        assert result.error_category == "INVALID_ARGUMENTS"
+    else:
+        assert result.data["changed_files"] == []
 
 
 @pytest.mark.asyncio

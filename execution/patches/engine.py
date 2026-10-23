@@ -18,6 +18,7 @@ from execution.gateway.tool import (
     resolve_in_workspace,
 )
 from execution.patches.fileio import atomic_write_bytes
+from execution.security.paths import read_denied_reason
 from execution.patches.unified import (
     FilePatch,
     Hunk,
@@ -207,6 +208,7 @@ def plan_patch(
     base: dict[str, str] | None = None,
     reverse: bool = False,
     allow_delete: bool = False,
+    allow_secrets: bool = False,
 ) -> PatchPlan:
     """Parse and fully validate a patch without touching the filesystem."""
 
@@ -247,7 +249,7 @@ def plan_patch(
         )
 
     plans = [
-        _plan_file(workspace, fp, base.get(fp.path), allow_delete)
+        _plan_file(workspace, fp, base.get(fp.path), allow_delete, allow_secrets)
         for fp in file_patches
     ]
     patch_id = sha256_hex(patch_text.encode("utf-8"))
@@ -259,10 +261,15 @@ def _plan_file(
     fp: FilePatch,
     base_sha: str | None,
     allow_delete: bool,
+    allow_secrets: bool = False,
 ) -> FilePlan:
     path = fp.path
     target = resolve_in_workspace(workspace, path)
     ensure_writable_path(workspace, target)
+    denied = read_denied_reason(target.relative_to(workspace), allow_secrets)
+
+    if denied:
+        raise ToolError("PERMISSION_DENIED", f"{path}: {denied}")
 
     if target == workspace:
         raise ToolError("INVALID_ARGUMENTS", f"{path}: not a file path")

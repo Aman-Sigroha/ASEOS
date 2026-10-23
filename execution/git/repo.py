@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from execution.security.paths import raw_path_problem
+
 GIT_TIMEOUT_SECONDS = 20
 _REDIRECTING_ENV = (
     "GIT_DIR",
@@ -205,6 +207,11 @@ def clean_relative_paths(paths: list[str]) -> list[str]:
     for raw in paths:
         if not isinstance(raw, str) or not raw.strip() or "\0" in raw:
             raise GitError("INVALID_ARGUMENTS", f"Invalid path: {raw!r}")
+
+        problem = raw_path_problem(raw)
+
+        if problem:
+            raise GitError("INVALID_ARGUMENTS", f"Invalid path {raw!r}: {problem}")
 
         normalized = raw.replace("\\", "/")
 

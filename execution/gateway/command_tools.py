@@ -5,8 +5,10 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from execution.commands.process import ProcessLimits, ProcessResult, run_process
-from execution.commands.policy import CommandPolicy, PolicyDecision
+from execution.commands.policy import CAP_SHELL_NETWORK, CommandPolicy, PolicyDecision
+from execution.security.levels import ExecutionLevel
 from execution.gateway.capabilities import CAP_SHELL_RUN, CAP_TEST_RUN
+from execution.security.levels import ExecutionLevel
 from execution.gateway.tool import (
     Tool,
     ToolContext,
@@ -24,7 +26,35 @@ _ERROR_KIND_CATEGORY = {
     "invalid_argv": "INVALID_ARGUMENTS",
     "unsafe_argument": "INVALID_ARGUMENTS",
     "permission": "PERMISSION_DENIED",
+    "sandbox_unavailable": "PERMISSION_DENIED",
+    "sandbox_refused": "PERMISSION_DENIED",
 }
+
+
+def resolve_sandbox(context: ToolContext):
+    """The sandbox to use, or a refusal. Never silently downgrades to the host."""
+
+    sandbox = context.sandbox
+
+    if sandbox is None:
+        if context.require_sandbox:
+            raise ToolError(
+                "PERMISSION_DENIED",
+                "Commands must run in a sandbox but none is configured; "
+                "refusing to run on the host.",
+            )
+
+        return None
+
+    usable, reason = sandbox.availability()
+
+    if not usable:
+        raise ToolError(
+            "PERMISSION_DENIED",
+            f"The sandbox is unavailable ({reason}); refusing to run on the host.",
+        )
+
+    return sandbox
 
 
 def _artifacts(result: ProcessResult) -> list[ArtifactRef]:
@@ -61,6 +91,7 @@ def _data(
         "spool_truncated": result.spool_truncated,
         "output_files": result.output_files,
         "process_tree": result.tree,
+        "sandboxed": "sandbox" in result.tree,
     }
 
     if decision is not None:
@@ -173,6 +204,7 @@ class RunCommandTool(Tool):
 
     spec = ToolSpec(
         name="shell.run",
+        level=ExecutionLevel.DEV_EXECUTION,
         action_type="RUN_COMMAND",
         description=(
             "Run one allowed development command (tests, linters, type "
@@ -218,6 +250,15 @@ class RunCommandTool(Tool):
                 },
             )
 
+        if decision.risk == "high" and context.max_level < ExecutionLevel.ELEVATED:
+            raise ToolError(
+                "PERMISSION_DENIED",
+                "This command is high risk and needs execution level "
+                f"ELEVATED; this gateway is limited to {context.max_level.name}.",
+                data={"command": argv, "policy": {"rule": decision.rule, "risk": decision.risk}},
+            )
+
+        sandbox = resolve_sandbox(context)
         limits = ProcessLimits(
             timeout_seconds=self.policy.clamp_timeout(args.timeout_seconds),
             max_memory_bytes=self.limits.max_memory_bytes,
@@ -234,6 +275,8 @@ class RunCommandTool(Tool):
             limits=limits,
             cancel=context.cancel,
             workspace=context.workspace,
+            sandbox=sandbox,
+            network=bool(decision.required_capabilities & {CAP_SHELL_NETWORK}),
         )
         return to_output(
             result,
@@ -253,6 +296,7 @@ class NoArgs(BaseModel):
 class RunTestTool(Tool):
     spec = ToolSpec(
         name="test.run",
+        level=ExecutionLevel.DEV_EXECUTION,
         action_type="RUN_TEST",
         description="Run the workspace test suite (python -m pytest).",
         args_model=NoArgs,
@@ -262,12 +306,14 @@ class RunTestTool(Tool):
     )
 
     def run(self, context: ToolContext, args: NoArgs) -> ToolOutput:
+        sandbox = resolve_sandbox(context)
         result = run_process(
             ["python", "-m", "pytest"],
             context.workspace,
             limits=ProcessLimits(timeout_seconds=120),
             cancel=context.cancel,
             workspace=context.workspace,
+            sandbox=sandbox,
         )
         return to_output(
             result, context.workspace, failure_category="TEST_FAILURE"

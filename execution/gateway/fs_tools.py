@@ -23,19 +23,22 @@ from pydantic import (
 )
 
 from execution.gateway.capabilities import CAP_FS_READ, CAP_FS_WRITE
+from execution.security.levels import ExecutionLevel
 from execution.gateway.tool import (
     Tool,
     ToolContext,
     ToolError,
     ToolOutput,
     ToolSpec,
+    ensure_readable_path,
     ensure_writable_path,
     resolve_in_workspace,
 )
 from execution.patches.apply import apply_patch
+from execution.security.paths import MANAGED_AREA, read_denied_reason
 from execution.patches.fileio import atomic_write_bytes
 
-SEARCH_IGNORED_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules"}
+SEARCH_IGNORED_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules", MANAGED_AREA}
 SEARCH_MAX_MATCHES = 100
 
 MAX_READ_BYTES = 1_000_000  # default/maximum returned content size
@@ -118,6 +121,7 @@ class ReadArgs(_Args):
 class ReadTool(Tool):
     spec = ToolSpec(
         name="repo.read",
+        level=ExecutionLevel.READ_ONLY,
         action_type="READ",
         description=(
             "Read a UTF-8 text file (optionally a 1-based inclusive line "
@@ -132,6 +136,7 @@ class ReadTool(Tool):
 
     def run(self, context: ToolContext, args: ReadArgs) -> ToolOutput:
         file_path = resolve_in_workspace(context.workspace, args.path)
+        ensure_readable_path(context.workspace, file_path, context.capabilities)
         raw, text = _load_text_file(file_path)
 
         lines = text.splitlines(keepends=True)
@@ -188,6 +193,7 @@ class ListDirArgs(_Args):
 class ListDirTool(Tool):
     spec = ToolSpec(
         name="repo.list_dir",
+        level=ExecutionLevel.READ_ONLY,
         action_type="LIST_DIR",
         description="List the entries of one workspace directory (not recursive).",
         args_model=ListDirArgs,
@@ -199,6 +205,7 @@ class ListDirTool(Tool):
 
     def run(self, context: ToolContext, args: ListDirArgs) -> ToolOutput:
         directory = resolve_in_workspace(context.workspace, args.path)
+        ensure_readable_path(context.workspace, directory)
 
         if not directory.is_dir():
             raise ToolError("INVALID_ARGUMENTS", "Path is not a directory")
@@ -206,6 +213,9 @@ class ListDirTool(Tool):
         entries = []
 
         for child in directory.iterdir():
+            if child.name.lower() == MANAGED_AREA:
+                continue
+
             try:
                 resolved = child.resolve()
                 is_link = child.is_symlink()
@@ -258,6 +268,7 @@ class FileInfoArgs(_Args):
 class FileInfoTool(Tool):
     spec = ToolSpec(
         name="repo.file_info",
+        level=ExecutionLevel.READ_ONLY,
         action_type="FILE_INFO",
         description=(
             "Report whether a path exists plus type, size, mtime, binary "
@@ -272,6 +283,14 @@ class FileInfoTool(Tool):
 
     def run(self, context: ToolContext, args: FileInfoArgs) -> ToolOutput:
         target = resolve_in_workspace(context.workspace, args.path)
+        relative = target.relative_to(context.workspace)
+        restricted = read_denied_reason(
+            relative, "fs.read_secrets" in context.capabilities
+        )
+
+        if restricted and MANAGED_AREA in str(relative).lower():
+            raise ToolError("PERMISSION_DENIED", restricted)
+
         info: dict = {"path": args.path, "exists": target.exists()}
 
         if not info["exists"]:
@@ -285,7 +304,10 @@ class FileInfoTool(Tool):
         ).isoformat()
         info["symlink"] = Path(context.workspace, args.path).is_symlink()
 
-        if info["type"] == "file" and stat.st_size <= HARD_READ_BYTES:
+        if restricted:
+            # Existence and size are fine to report; a hash of a secret is not.
+            info["restricted"] = restricted
+        elif info["type"] == "file" and stat.st_size <= HARD_READ_BYTES:
             raw = target.read_bytes()
             info["sha256"] = sha256_hex(raw)
             info["binary"] = _looks_binary(raw)
@@ -308,6 +330,7 @@ class SearchArgs(_Args):
 class SearchTool(Tool):
     spec = ToolSpec(
         name="repo.search",
+        level=ExecutionLevel.READ_ONLY,
         action_type="SEARCH",
         description="Case-insensitive text search across workspace files.",
         args_model=SearchArgs,
@@ -320,6 +343,7 @@ class SearchTool(Tool):
     def run(self, context: ToolContext, args: SearchArgs) -> ToolOutput:
         workspace = context.workspace
         search_root = resolve_in_workspace(workspace, args.path)
+        ensure_readable_path(workspace, search_root, {"fs.read_secrets"})
 
         if not search_root.exists():
             raise ToolError("INVALID_ARGUMENTS", "Search path does not exist")
@@ -333,7 +357,10 @@ class SearchTool(Tool):
                 if not path.is_file():
                     continue
 
-                if any(part in SEARCH_IGNORED_DIRS for part in path.parts):
+                if any(
+                    part.lower() in SEARCH_IGNORED_DIRS
+                    for part in path.relative_to(workspace).parts
+                ):
                     continue
 
                 resolved = path.resolve()
@@ -347,8 +374,14 @@ class SearchTool(Tool):
 
         needle = args.query.casefold()
         matches: list[str] = []
+        allow_secrets = "fs.read_secrets" in context.capabilities
+        skipped_sensitive = 0
 
         for file_path in files:
+            if read_denied_reason(file_path.relative_to(workspace), allow_secrets):
+                skipped_sensitive += 1
+                continue
+
             try:
                 lines = file_path.read_text(encoding="utf-8").splitlines()
             except (UnicodeError, OSError):
@@ -368,7 +401,10 @@ class SearchTool(Tool):
         return ToolOutput(
             stdout="\n".join(matches) if matches else "No matches found.",
             truncated=len(matches) >= SEARCH_MAX_MATCHES,
-            data={"match_count": len(matches)},
+            data={
+                "match_count": len(matches),
+                "skipped_sensitive_files": skipped_sensitive,
+            },
         )
 
 
@@ -386,6 +422,7 @@ class EditArgs(_Args):
 class EditTool(Tool):
     spec = ToolSpec(
         name="patch.replace",
+        level=ExecutionLevel.LOW_RISK_MUTATION,
         action_type="EDIT",
         description="Replace a unique text span in one workspace file.",
         args_model=EditArgs,
@@ -443,6 +480,7 @@ class WriteTool(Tool):
 
     spec = ToolSpec(
         name="repo.write",
+        level=ExecutionLevel.LOW_RISK_MUTATION,
         action_type="WRITE",
         description=(
             "Create a new file, or overwrite an existing one when "

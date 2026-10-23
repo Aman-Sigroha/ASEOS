@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Any
 
+from execution.security.paths import is_secret_path
 from execution.git.repo import (
     GitError,
     clean_relative_paths,
@@ -86,7 +87,7 @@ def _parse_numstat(output: str) -> dict[str, tuple[int | None, int | None]]:
 
 
 def _untracked_diff(
-    workspace: Path, paths: list[str] | None
+    workspace: Path, paths: list[str] | None, allow_secrets: bool = False
 ) -> tuple[str, list[dict[str, Any]], list[dict[str, str]]]:
     listing = run_git(
         workspace,
@@ -98,6 +99,10 @@ def _untracked_diff(
     skipped: list[dict[str, str]] = []
 
     for name in names:
+        if not allow_secrets and is_secret_path(name):
+            skipped.append({"path": name, "reason": "secret file; content not shown"})
+            continue
+
         if len(files) >= MAX_UNTRACKED_FILES:
             skipped.append({"path": name, "reason": "too many untracked files"})
             continue
@@ -148,6 +153,7 @@ def get_diff(
     include_untracked: bool = True,
     max_bytes: int = DEFAULT_MAX_DIFF_BYTES,
     context: int = 3,
+    allow_secrets: bool = False,
 ) -> dict[str, Any]:
     """Diff with an explicit base.
 
@@ -183,7 +189,6 @@ def get_diff(
 
     flags = [*_COMMON, f"-U{context}"]
     tail = [*selector, *_pathspec(paths)]
-    text = run_git(workspace, ["diff", *flags, *tail]).stdout
     status_out = run_git(
         workspace, ["diff", "--name-status", "-z", "-M", "--no-ext-diff", *tail]
     ).stdout
@@ -193,6 +198,34 @@ def get_diff(
 
     files = _parse_name_status(status_out)
     stats = _parse_numstat(numstat_out)
+    secret_paths = set()
+
+    if not allow_secrets:
+        for file_info in files:
+            names = [file_info["path"], file_info.get("original_path") or ""]
+
+            if any(n and is_secret_path(n) for n in names):
+                file_info["redacted"] = True
+                secret_paths.update(n for n in names if n)
+
+    if secret_paths:
+        # Diff only the files whose content may be shown.
+        keep = [
+            n
+            for f in files
+            if not f.get("redacted")
+            for n in (f["path"], f.get("original_path"))
+            if n
+        ]
+        text = (
+            run_git(
+                workspace, ["diff", *flags, *selector, "--", *keep]
+            ).stdout
+            if keep
+            else ""
+        )
+    else:
+        text = run_git(workspace, ["diff", *flags, *tail]).stdout
 
     for file_info in files:
         added, deleted = stats.get(file_info["path"], (None, None))
@@ -203,7 +236,9 @@ def get_diff(
     skipped: list[dict[str, str]] = []
 
     if include_untracked and mode in ("unstaged", "base"):
-        extra_text, extra_files, skipped = _untracked_diff(workspace, paths)
+        extra_text, extra_files, skipped = _untracked_diff(
+            workspace, paths, allow_secrets
+        )
         text += extra_text
         files += extra_files
 

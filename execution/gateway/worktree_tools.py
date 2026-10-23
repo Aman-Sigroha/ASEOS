@@ -6,6 +6,7 @@ from execution.gateway.capabilities import (
     CAP_WORKTREE_MANAGE,
 )
 from execution.gateway.git_tools import _call
+from execution.security.levels import ExecutionLevel
 from execution.gateway.tool import (
     Tool,
     ToolContext,
@@ -32,6 +33,7 @@ class WorktreeCreateArgs(_Args):
 class WorktreeCreateTool(Tool):
     spec = ToolSpec(
         name="git.worktree.create",
+        level=ExecutionLevel.LOW_RISK_MUTATION,
         action_type="WORKTREE_CREATE",
         description=(
             "Create an isolated, registered worktree for a task from a base "
@@ -68,6 +70,7 @@ class WorktreeListArgs(_Args):
 class WorktreeListTool(Tool):
     spec = ToolSpec(
         name="git.worktree.list",
+        level=ExecutionLevel.READ_ONLY,
         action_type="WORKTREE_LIST",
         description=(
             "List managed worktrees with their live state: uncommitted "
@@ -107,6 +110,7 @@ class WorktreeRemoveArgs(_Args):
 class WorktreeRemoveTool(Tool):
     spec = ToolSpec(
         name="git.worktree.remove",
+        level=ExecutionLevel.ELEVATED,
         action_type="WORKTREE_REMOVE",
         description=(
             "Remove a managed worktree. Refuses when it holds uncommitted "
@@ -143,6 +147,7 @@ class WorktreeReconcileArgs(_Args):
 class WorktreeReconcileTool(Tool):
     spec = ToolSpec(
         name="git.worktree.reconcile",
+        level=ExecutionLevel.LOW_RISK_MUTATION,
         action_type="WORKTREE_RECONCILE",
         description=(
             "Compare worktree records with Git and the disk (e.g. after a "

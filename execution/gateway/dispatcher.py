@@ -2,9 +2,11 @@ import asyncio
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 
+from execution.security.levels import PROFILES, ExecutionLevel, Profile
 from execution.gateway.tool import (
     Tool,
     ToolContext,
@@ -29,6 +31,9 @@ class ExecutionGateway:
         tools: list[Tool] | None = None,
         granted_capabilities: frozenset[str] | set[str] | None = None,
         stop_grace_seconds: float = 10.0,
+        profile: Profile | str | None = None,
+        sandbox: Any = None,
+        require_sandbox: bool | None = None,
     ) -> None:
         self.workspace = Path(workspace_path).resolve()
 
@@ -41,7 +46,33 @@ class ExecutionGateway:
         self.stop_grace_seconds = stop_grace_seconds
         self._running: dict[str, list[threading.Event]] = {}
         self._running_lock = threading.Lock()
-        self.granted_capabilities = frozenset(granted_capabilities or ())
+        if isinstance(profile, str):
+            if profile not in PROFILES:
+                raise ValueError(f"Unknown profile: {profile!r}")
+
+            profile = PROFILES[profile]
+
+        self.profile = profile
+        capabilities = (
+            granted_capabilities
+            if granted_capabilities is not None
+            else (profile.capabilities if profile else ())
+        )
+        # A profile is a ceiling: capabilities beyond it are never granted.
+        self.granted_capabilities = frozenset(capabilities)
+
+        if profile is not None:
+            self.granted_capabilities &= profile.capabilities
+
+        self.max_level = (
+            profile.max_level if profile else ExecutionLevel.ELEVATED
+        )
+        self.sandbox = sandbox
+        self.require_sandbox = (
+            require_sandbox
+            if require_sandbox is not None
+            else bool(profile and profile.sandbox_required)
+        )
 
         for tool in tools or []:
             self.register(tool)
@@ -92,7 +123,38 @@ class ExecutionGateway:
                 ),
             )
 
+    def describe_tools(self) -> list[dict[str, Any]]:
+        """What each registered tool needs, for planners and UIs."""
+
+        return [
+            {
+                "name": tool.spec.name,
+                "action_type": tool.spec.action_type,
+                "level": tool.spec.level.name,
+                "capabilities": sorted(tool.spec.capabilities),
+                "read_only": tool.spec.read_only,
+                "idempotent": tool.spec.idempotent,
+                "timeout_seconds": tool.spec.timeout_seconds,
+                "available": self._permitted(tool),
+            }
+            for tool in self._tools.values()
+        ]
+
+    def _permitted(self, tool: Tool) -> bool:
+        return (
+            tool.spec.level <= self.max_level
+            and not (tool.spec.capabilities - self.granted_capabilities)
+        )
+
     def _check_capabilities(self, tool: Tool) -> None:
+        if tool.spec.level > self.max_level:
+            raise ToolError(
+                "PERMISSION_DENIED",
+                f"Tool '{tool.spec.name}' is disabled: it needs execution "
+                f"level {tool.spec.level.name}, but this gateway is limited "
+                f"to {self.max_level.name}.",
+            )
+
         missing = tool.spec.capabilities - self.granted_capabilities
 
         if missing:
@@ -123,6 +185,9 @@ class ExecutionGateway:
             workspace=self.workspace,
             action_id=action.id,
             capabilities=self.granted_capabilities,
+            max_level=self.max_level,
+            sandbox=self.sandbox,
+            require_sandbox=self.require_sandbox,
             cancel=cancel,
         )
         self._track(action.id, cancel)

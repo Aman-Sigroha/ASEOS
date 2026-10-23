@@ -98,7 +98,15 @@ canonical id. Aligning Role 1's registry names is an open item.
 - **Process tree:** on timeout, cancel and orphaned children the whole tree is killed. `data.process_tree` = `{killed, mechanism: job_object|process_group|taskkill, leftover, orphans?}`; `leftover > 0` means something could not be stopped and is also written into the error message.
 - **Cancellation:** `gateway.cancel(action_id)`, `cancel_all()`, `await shutdown()` and cancelling the awaiting asyncio task all stop running commands. The gateway timeout does the same before returning `TIMEOUT`.
 
-Default granted capabilities: `fs.read`, `fs.write`, `git.read`, `test.run`. Not granted by default: `fs.delete`, `git.write`, `git.discard`, `worktree.manage`, `worktree.discard`, `shell.run`, `shell.network`.
+Default granted capabilities: `fs.read`, `fs.write`, `git.read`, `test.run`. Not granted by default: `fs.delete`, `fs.read_secrets`, `git.write`, `git.discard`, `worktree.manage`, `worktree.discard`, `shell.run`, `shell.network`.
+
+### 2.6 Security semantics (details in [SECURITY_MODEL.md](SECURITY_MODEL.md))
+
+- **Levels and profiles.** Every tool declares an `ExecutionLevel` (`READ_ONLY` < `LOW_RISK_MUTATION` < `DEV_EXECUTION` < `ELEVATED`; undeclared = `ELEVATED`). `ExecutionGateway(profile="read_only"|"worktree_edit"|"dev"|"elevated")` limits both the level and the capabilities (the profile is a ceiling). A tool above the gateway's level returns `PERMISSION_DENIED` naming both levels. Without a profile the gateway is limited by capabilities only (backward compatible). `gateway.describe_tools()` lists each tool's level, capabilities, timeout and whether it is available.
+- **The model cannot raise privileges.** Level, capabilities, sandbox and profile come from gateway configuration; same-named fields in a payload are ignored.
+- **Paths.** Malformed paths (NUL/control characters; on Windows also `:`, `<>"|?*` and device names like `CON`, `aux.txt`) are `INVALID_ARGUMENTS`. `.git`, `.env*` (except `.example/.sample/.template/.dist`) and the managed worktree area are write-protected; the managed area is also unreadable, unsearchable and hidden from listings.
+- **Secrets.** Content of secret-bearing files (`.env*`, `*.pem`, `*.key`, `.npmrc`, `.ssh/**`, …) is not returned by `repo.read`, `repo.search` (skipped, counted in `data.skipped_sensitive_files`), `repo.file_info` (no hash, `data.restricted`), patch tools, or `git.diff` (file listed with `redacted=true`, content omitted; untracked secrets listed as skipped). `fs.read_secrets` lifts this; it is in no profile.
+- **Sandbox.** A gateway may be given `sandbox=ContainerSandbox(...)`. `shell.run` and `test.run` then run inside it (no network unless an install command was granted `shell.network`, only the workspace mounted, read-only root, capabilities dropped, pid/memory limits, explicit environment). If a profile requires a sandbox (`dev`, `elevated`) or one is configured but unusable, the command is refused with `PERMISSION_DENIED` — it never falls back to the host. `data.sandboxed` and `data.process_tree.{sandbox,container,network,image}` report what was used.
 
 ## 3. `ExecutionResult`
 

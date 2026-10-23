@@ -4,13 +4,14 @@ Execution, Git, worktrees, command running, sandboxing and testing.
 
 - **Status snapshot date:** 2026-10-23
 - **Branch audited:** `execution` (HEAD `a91605f`)
-- **Test baseline:** `python -m pytest -q` → 633 passed, 5 skipped (symlink/POSIX-mode tests skip where unavailable), 0 failed (default `testpaths` now exclude the
+- **Test baseline:** `python -m pytest -q` → 764 passed, 6 skipped (symlink/POSIX-mode tests and the real-container test skip where unavailable), 0 failed (default `testpaths` now exclude the
   intentionally failing `fixtures/` repo). Before the first slices it was 202 passed + 1 fixture failure.
-- **Progress log:** slices A1–A3, B1–B2, C1–C4 (Phase 2 filesystem) C5–C9 (Phase 3 patches) D1–D3, D9 (Phase 4 Git) D4–D8, D11 (Phase 5 worktrees) and E1–E5 (Phase 6 commands) are done; B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
+- **Progress log:** slices A1–A3, B1–B2, C1–C4 (Phase 2 filesystem) C5–C9 (Phase 3 patches) D1–D3, D9 (Phase 4 Git) D4–D8, D11 (Phase 5 worktrees) E1–E5 (Phase 6 commands) and H1–H6 (Phase 7 security) are done; B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
 
 Companion documents: [ARCHITECTURE.md](ARCHITECTURE.md) (how the system fits together),
 [API_CONTRACTS.md](API_CONTRACTS.md) (baseline runtime ↔ execution contract),
 [EXECUTION_CONTRACT.md](EXECUTION_CONTRACT.md) (gateway pipeline, tools, result fields, error categories),
+[SECURITY_MODEL.md](SECURITY_MODEL.md) (threat model, isolation, limits),
 [CONTRIBUTING.md](CONTRIBUTING.md) (verification commands and safety rules).
 
 ---
@@ -62,7 +63,7 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 | 4 | Git status, diff & operations | 🟡 PARTIAL | Structured status/diff/info and scoped stage/commit/branch/discard done; worktree-lifecycle protection of user work (Phase 5) pending |
 | 5 | Worktrees & task isolation | 🟡 PARTIAL | Registry, base commits, safe/backed-up removal, locking, reconciliation, gateway tools done; retention policy and live-owner leases pending |
 | 6 | Controlled command execution | 🟡 PARTIAL | Hardened runner (env policy, output bounds, verified tree kill, cancel, limits), command policy and `shell.run` done; POSIX paths unverified, no sandbox yet |
-| 7 | Sandboxing & execution security | ⬜ PENDING | Only worktree isolation + `RUN_COMMAND` disabled |
+| 7 | Sandboxing & execution security | 🟡 PARTIAL | Threat model, path/secret hardening, levels & profiles, container backend with fail-closed enforcement done; **real-container proof pending** |
 | 8 | Test discovery & execution | 🟡 PARTIAL | Hardcoded `python -m pytest`; no discovery or report parsing |
 | 9 | Deterministic verification evidence | 🟡 PARTIAL | Role 1 verifier exists; not tied to code version/artifacts |
 | 10 | Artifacts, retention & audit | ⬜ PENDING | Only runtime events exist |
@@ -70,7 +71,7 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 | 12 | Cross-role integration | 🟡 PARTIAL | Role 1 wired in; Role 2 and Role 3 pending |
 | 13 | Security, testing & performance qualification | 🟡 PARTIAL | Unit/integration tests only |
 
-**Role 4 completion checklist: 9 ✅ done · 11 🟡 partial · 6 ⬜ pending (of 26)** (an item flips only when its full acceptance criterion is met). See [Section 4](#4-role-4-completion-checklist).
+**Role 4 completion checklist: 9 ✅ done · 12 🟡 partial · 5 ⬜ pending (of 26)** (an item flips only when its full acceptance criterion is met). See [Section 4](#4-role-4-completion-checklist).
 
 ---
 
@@ -198,17 +199,21 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 - ✅ Tests: `test_process_runner.py` (38), `test_command_policy.py` (84), `test_shell_tool.py` (28) — real processes, real grandchildren, verified dead afterwards.
 - 🟡 Not covered / honest limits: **the policy decides what may start, not what an allowed program does** — a test suite is arbitrary code and can still read files, use the network or spawn processes within the limits (that is Phase 7). `shell.network` gates *install-type commands* only; network access is not blocked. `HOME`/`USERPROFILE` are passed through, so tools can read user-level config (`.npmrc`, `.pypirc`). The POSIX code paths (process group, `prlimit`) are written and unit-tested for logic but were **not run on a POSIX machine** in this environment. POSIX has no memory or process-count limit yet (cgroups/containers are Phase 7). Command logs are plain files in the system temp directory with no retention until Phase 10. Streaming logs are not implemented (results are returned when the command ends). `runtime/verification/command.py` (Role 1) still uses `create_subprocess_shell` and has not been moved onto this runner.
 
-### Phase 7 — Sandboxing and execution security ⬜ PENDING
+### Phase 7 — Sandboxing and execution security 🟡 PARTIAL
 
 *Completion criterion: a defined, tested security boundary; high-risk operations cannot gain permissions because the model asks.*
 
-- ✅ (Baseline) Worktree isolation of source changes; `RUN_COMMAND` disabled; limitations documented in `API_CONTRACTS.md` and `ARCHITECTURE.md`.
-- ⬜ `docs/SECURITY_MODEL.md` with threat model (unsafe model commands, prompt injection in repo files/output, malicious build/test scripts, out-of-workspace writes, secret exposure, runaway/fork-bomb processes, network access, cross-task interference, user-change loss).
-- ⬜ Decide the isolation strategy (layers: path enforcement, worktrees, temp env dirs, container/OS isolation, network restriction, CPU/memory/time limits, env scrubbing).
-- ⬜ Risk-based execution levels agreed with Role 1 (read-only / low-risk mutation / dev execution / elevated).
-- ⬜ Per-tool permissions and resource limits.
-- ⬜ Sandbox tests: workspace/symlink escape, host-path exposure, secret leakage, resource limits, cross-workspace access.
-- ⬜ Known-limitations document kept current.
+- ✅ `docs/SECURITY_MODEL.md`: trust boundaries, threat model (11 threats with controls and honest status), isolation decision and why, execution levels/profiles, known limitations, audit findings, test map.
+- ✅ Audit of existing code found and fixed real holes (each with a regression test): Windows device names and NTFS alternate data streams in paths; secret files readable/searchable/hashable/patchable and leaking through `git.diff` and patch-conflict details; other tasks' worktrees readable and writable through the main checkout's file tools; malformed paths surfacing as `INTERNAL_ERROR`. Case-variant and alias spellings of `.git`/`.env` were checked and were already closed.
+- ✅ Shared path rules (`execution/security/paths.py`) used by every tool: raw-path validation, write protection (`.git`, `.env*`, managed worktree area), secret-bearing file detection (`.env*`, keys, `.npmrc`, `.ssh/`, …) with the `fs.read_secrets` override, template files (`.example`, `.sample`) exempt.
+- ✅ Risk-based execution levels (`READ_ONLY`, `LOW_RISK_MUTATION`, `DEV_EXECUTION`, `ELEVATED`) declared by every tool (unclassified tools default to the highest) and capability profiles (`read_only`, `worktree_edit`, `dev`, `elevated`) enforced by the gateway as a ceiling, in addition to capabilities. Payload fields cannot change either. `gateway.describe_tools()` reports level, capabilities, timeout and availability. *(The level names are proposed; they still need Role 1's agreement.)*
+- ✅ Per-tool permissions and resource limits: capabilities + level + timeout per tool (`describe_tools`), command limits (timeout ≤600 s, output caps, Windows job limits, container pid/memory limits).
+- ✅ Isolation strategy decided: layered, with a container sandbox (Docker/Podman) behind a replaceable `Sandbox` interface. `ContainerSandbox` builds a locked-down `run` command (no network, read-only root, only the workspace mounted, caps dropped, non-root, pid/memory/cpu limits, explicit `-e` environment only) and terminates/cleans up the named container on timeout/cancel. `shell.run` and `test.run` use it when configured.
+- ✅ Fail closed: profiles `dev`/`elevated` require a sandbox; with none configured, or the configured one unavailable, commands are refused (`PERMISSION_DENIED`) and never run on the host. A broken sandbox backend is also treated as a refusal.
+- ✅ Sandbox/security tests: path & secret tests (`test_path_security.py`, 79), profiles/levels/cross-task isolation (`test_profiles_and_isolation.py`, 19), sandbox command line, environment, fail-closed, plumbing (`test_sandbox.py`, 33 + 1 opt-in).
+- 🟡 **The container boundary itself is not yet proven.** No Docker daemon was running in the development environment, so the real-container test (network blocked, host paths invisible, read-only root) was written but skipped. The command line, environment filtering and lifecycle are verified against a stand-in engine, not a container. Run `execution/tests/test_sandbox.py` on a machine with Docker and the `python:3.12-slim` image, and fix whatever it shows, before relying on the boundary.
+- 🟡 Without a sandbox (the default gateway, or `read_only`/`worktree_edit` profiles, which run no programs), allowed programs run as the user with network and file access; secrets are name-detected only; POSIX native limits and process handling are untested here. All listed in `SECURITY_MODEL.md` §6.
+- ⬜ Image provisioning (building an image with the project's toolchain), a VM-backed backend for hostile code, native Linux (`bubblewrap`) and Windows (AppContainer) backends, disk quotas.
 
 ### Phase 8 — Test discovery and execution 🟡 PARTIAL
 
@@ -357,6 +362,11 @@ sandbox → tests → verification → recovery/artifacts → integration/securi
 **Slice group E — Commands & sandbox**
 - ✅ E1. cwd enforcement + env policy. ✅ E2. Output caps + truncation metadata. 🟡 E3. Process-tree kill + orphan test (done and verified on Windows; POSIX written but **not run** here). ✅ E4. Cancellation (+ gateway shutdown). ✅ E5. Command policy + `RUN_COMMAND` for an allow-list only.
 - ⬜ E3b. Run the process tests on Linux/macOS (CI) and fix whatever they reveal.
+- ✅ H1. Threat model + `SECURITY_MODEL.md`. ✅ H2. Path hardening (Windows names/ADS, protected and managed areas). ✅ H3. Secret-file read policy incl. `git.diff` redaction. ✅ H4. Execution levels and profiles. ✅ H5. Sandbox interface + container backend + fail-closed. ✅ H6. Cross-task isolation tests.
+- ⬜ H7. **Run the sandbox tests against a real Docker/Podman daemon** (and add that run to CI); fix what they reveal. Until then the container boundary is unproven.
+- ⬜ H8. Agree level and profile names with Role 1; have the runtime pick a profile per task and ask the user before `elevated`.
+- ⬜ H9. Image provisioning: build/select an image containing the project's toolchain; decide how dependencies get in without network.
+- ⬜ H10. Native fallbacks (bubblewrap on Linux, AppContainer on Windows) and a VM-backed backend for hostile code.
 - ⬜ E9. Route Role 1's `CommandVerifier` through `run_process` / the policy (needs Role 1).
 - ⬜ E10. Streaming logs for long commands (live output separate from completion).
 - E6. `SECURITY_MODEL.md` + threat model. E7. Isolation strategy decision (ADR). E8. First isolation layer (limits/env/network) + sandbox tests.
@@ -396,7 +406,7 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 - [x] Implement bounded process execution — argv only, scrubbed env, bounded + spooled output, Windows job limits
 - [x] Add timeouts, cancellation and child-process cleanup — tree kill verified on Windows; gateway cancel/shutdown
 - [x] Define command/environment permissions — default-deny command policy, env allow-list, capability-gated installs
-- [ ] Implement and test the selected isolation strategy
+- [~] Implement and test the selected isolation strategy — container backend, profiles and fail-closed enforcement built and tested against a stand-in engine; not yet run against a real daemon
 
 **E. Testing and verification**
 - [~] Implement test discovery and runner adapters — hardcoded pytest
@@ -415,7 +425,7 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 - [ ] Coordinate index refreshes and worktrees with Role 3
 - [~] Complete security, failure-injection and performance tests — unit/integration only
 
-`[x]` done · `[~]` partial · `[ ]` pending — **9 / 11 / 6** of 26.
+`[x]` done · `[~]` partial · `[ ]` pending — **9 / 12 / 5** of 26.
 
 ---
 

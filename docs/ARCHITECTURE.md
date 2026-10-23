@@ -78,6 +78,8 @@ ASEOS/
 │   │                         fileio.py (atomic write), apply.py (legacy exact-text replace used by execute_task)
 │   ├── git/                  operations.py (status, diff), worktree.py (create/remove);
 │   │                         status.py / diff.py are empty placeholders
+│   ├── security/             paths.py (path/secret rules), levels.py (execution levels + profiles)
+│   ├── sandbox/              base.py (Sandbox interface), container.py (Docker/Podman backend)
 │   ├── commands/             process.py (hardened runner: tree kill, limits, cancel), env.py, capture.py,
 │   │                         policy.py (default-deny command policy), runner.py (trusted-caller wrapper)
 │   ├── testing/runner.py     run_tests(worktree) → python -m pytest
@@ -194,7 +196,7 @@ What is enforced:
 
 What is **not** provided (do not assume it):
 
-- A real sandbox — worktrees isolate *source*, not processes, network, secrets or the rest of the filesystem.
+- A *proven* sandbox. Worktrees isolate source, not processes. A container backend exists and is enforced fail-closed by the `dev`/`elevated` profiles, but it has only been tested against a stand-in engine, not a real daemon (see [SECURITY_MODEL.md](SECURITY_MODEL.md) §6).
 - Anything beyond *starting* only allowed programs: what a test suite or build script then does (network, files outside the workspace, user-level config via `HOME`) is not restricted; POSIX process handling is untested here; no memory/process limits off Windows.
 - Patch recovery, crash recovery, file locking, and notification of other subsystems after writes (`repo.write` does detect stale-version conflicts).
 - Redaction, artifact retention or an execution audit trail beyond runtime events.
@@ -261,7 +263,7 @@ artifacts, command policy and sandboxing — will be added in slices so the runt
   `tests/agent/test_real_executor_integration.py`.
 - Role 1 suites: `tests/agent`, `decision`, `events`, `llm`, `planner`, `schemas`, `state`, `task`, `tools`,
   `verification`.
-- Baseline at time of writing: **633 passed, 5 skipped** (symlink-file and POSIX-mode tests skip when the OS does not allow
+- Baseline at time of writing: **764 passed, 6 skipped** (symlink-file and POSIX-mode tests skip when the OS does not allow
   them; a Windows directory-junction test covers the same escape). `pyproject.toml` `testpaths` limits default collection to `tests/`
   and `execution/tests/`; the deliberately broken `fixtures/repositories/calculator` test (which the demo fixes)
   is not collected.
