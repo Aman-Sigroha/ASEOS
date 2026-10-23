@@ -1,10 +1,41 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field, model_validator
+
+
+ErrorCategory = Literal[
+    "INVALID_ARGUMENTS",
+    "UNKNOWN_TOOL",
+    "PERMISSION_DENIED",
+    "WORKSPACE_UNAVAILABLE",
+    "RESOURCE_LIMIT",
+    "TIMEOUT",
+    "CANCELLED",
+    "PROCESS_FAILURE",
+    "PATCH_CONFLICT",
+    "GIT_FAILURE",
+    "TEST_FAILURE",
+    "INTERNAL_ERROR",
+]
+
+
+class ArtifactRef(BaseModel):
+    """Reference to a large output stored outside the result."""
+
+    id: str = Field(min_length=1)
+    kind: str = Field(min_length=1)
+    description: str = ""
 
 
 class ExecutionResult(BaseModel):
-    """Result returned by the execution layer."""
+    """Result returned by the execution layer.
+
+    The first six fields are the original baseline contract. The remaining
+    fields are optional extensions with defaults, so existing producers and
+    consumers keep working.
+    """
 
     action_id: str = Field(min_length=1)
     success: bool
@@ -12,6 +43,20 @@ class ExecutionResult(BaseModel):
     stderr: str = ""
     exit_code: int | None = None
     duration_ms: int | None = Field(default=None, ge=0)
+
+    # Extensions (see docs/EXECUTION_CONTRACT.md).
+    tool: str | None = None
+    error_category: ErrorCategory | None = None
+    truncated: bool = False
+    artifacts: list[ArtifactRef] = Field(default_factory=list)
+    data: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _success_has_no_error_category(self) -> "ExecutionResult":
+        if self.success and self.error_category is not None:
+            raise ValueError("A successful result cannot have an error_category.")
+
+        return self
 
 
 class TestRunResult(BaseModel):

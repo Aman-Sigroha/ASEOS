@@ -19,4 +19,5 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+testpaths = ["tests", "execution/tests"]
 asyncio_mode = "strict"

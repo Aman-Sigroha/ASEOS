@@ -1,8 +1,41 @@
+import re
 import subprocess
 from pathlib import Path
 
 
 WORKTREE_ROOT = ".aseos_worktrees"
+
+# Conservative: the id becomes both a directory name and a Git branch name.
+_TASK_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+def validate_task_id(task_id: str) -> str:
+    """Return task_id if it is safe to use as a directory and branch name."""
+
+    if (
+        not isinstance(task_id, str)
+        or not _TASK_ID_PATTERN.fullmatch(task_id)
+        or ".." in task_id
+        or task_id.endswith((".", ".lock"))
+    ):
+        raise ValueError(
+            "Invalid task_id: use 1-64 letters, digits, '.', '_' or '-', "
+            "starting with a letter or digit."
+        )
+
+    return task_id
+
+
+def _managed_worktree_dir(repo: Path, task_id: str) -> Path:
+    """Resolve the task's worktree path, guaranteed inside the managed root."""
+
+    root = (repo / WORKTREE_ROOT).resolve()
+    worktree_dir = (root / validate_task_id(task_id)).resolve()
+
+    if worktree_dir.parent != root:
+        raise ValueError("Worktree path escapes the managed worktree root")
+
+    return worktree_dir
 
 
 def create_worktree(repo_path: str, task_id: str) -> str:
@@ -13,7 +46,7 @@ def create_worktree(repo_path: str, task_id: str) -> str:
     """
 
     repo = Path(repo_path).resolve()
-    worktree_dir = repo / WORKTREE_ROOT / task_id
+    worktree_dir = _managed_worktree_dir(repo, task_id)
 
     worktree_dir.parent.mkdir(parents=True, exist_ok=True)
 
@@ -49,7 +82,7 @@ def remove_worktree(repo_path: str, task_id: str) -> None:
     """
 
     repo = Path(repo_path).resolve()
-    worktree_dir = (repo / WORKTREE_ROOT / task_id).resolve()
+    worktree_dir = _managed_worktree_dir(repo, task_id)
     branch_name = f"aseos/{task_id}"
 
     # Check whether Git still registers this worktree.

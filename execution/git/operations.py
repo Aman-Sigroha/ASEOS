@@ -11,6 +11,8 @@ def git_status(repo_path: str) -> dict:
         ["git", "-C", repo_path, "branch", "--show-current"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=True,
     )
 
@@ -18,6 +20,8 @@ def git_status(repo_path: str) -> dict:
         ["git", "-C", repo_path, "status", "--porcelain"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=True,
     )
 
@@ -43,6 +47,8 @@ def git_diff(repo_path: str) -> str:
         ["git", "-C", repo_path, "diff"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=True,
     )
 
