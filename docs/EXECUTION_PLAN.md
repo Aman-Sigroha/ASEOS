@@ -4,9 +4,9 @@ Execution, Git, worktrees, command running, sandboxing and testing.
 
 - **Status snapshot date:** 2026-10-23
 - **Branch audited:** `execution` (HEAD `a91605f`)
-- **Test baseline:** `python -m pytest -q` → 240 passed, 0 failed (default `testpaths` now exclude the
+- **Test baseline:** `python -m pytest -q` → 268 passed, 4 skipped (symlink tests skip where symlinks need privileges), 0 failed (default `testpaths` now exclude the
   intentionally failing `fixtures/` repo). Before the first slices it was 202 passed + 1 fixture failure.
-- **Progress log:** slices A1, A2, A3, B1, B2 are done and B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
+- **Progress log:** slices A1–A3, B1–B2 and C1–C4 (Phase 2 filesystem) are done; B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
 
 Companion documents: [ARCHITECTURE.md](ARCHITECTURE.md) (how the system fits together),
 [API_CONTRACTS.md](API_CONTRACTS.md) (baseline runtime ↔ execution contract),
@@ -57,7 +57,7 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 | ----- | ----- | ------ | ----- |
 | 0 | Audit scaffold & finalize contracts | 🟡 PARTIAL | Audit, mock adapter, result/error contract + `EXECUTION_CONTRACT.md` done; worktree/security docs, fixtures missing |
 | 1 | Execution gateway & tool adapters | 🟡 PARTIAL | `ExecutionGateway` + 6 typed tools, capabilities, error taxonomy done; events, cancellation, registry alignment pending |
-| 2 | Safe filesystem tools | 🟡 PARTIAL | READ/SEARCH inside workspace; no limits, metadata, listing, safe writes |
+| 2 | Safe filesystem tools | 🟡 PARTIAL | Bounded reads, line ranges, list/info, hash-checked atomic writes, symlink policy done; change notifications (Role 3) pending |
 | 3 | Patch validation & application | 🟡 PARTIAL | Single-file exact-text replace; no unified diff, multi-file, recovery |
 | 4 | Git status, diff & operations | 🟡 PARTIAL | Basic status + unstaged diff; no staged/base/stats/mutations |
 | 5 | Worktrees & task isolation | 🟡 PARTIAL | Create/remove works; no metadata, locking, recovery, safe cleanup |
@@ -70,7 +70,7 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 | 12 | Cross-role integration | 🟡 PARTIAL | Role 1 wired in; Role 2 and Role 3 pending |
 | 13 | Security, testing & performance qualification | 🟡 PARTIAL | Unit/integration tests only |
 
-**Role 4 completion checklist: 1 ✅ done · 12 🟡 partial · 13 ⬜ pending (of 26)** (an item flips only when its full acceptance criterion is met). See [Section 4](#4-role-4-completion-checklist).
+**Role 4 completion checklist: 2 ✅ done · 12 🟡 partial · 12 ⬜ pending (of 26)** (an item flips only when its full acceptance criterion is met). See [Section 4](#4-role-4-completion-checklist).
 
 ---
 
@@ -116,18 +116,18 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 
 *Completion criterion: the runtime can reliably read and write permitted files; invalid paths and conflicting modifications fail safely.*
 
-- ✅ Read a file by workspace-relative path with `resolve()` + `is_relative_to` containment (blocks `..` and symlink targets that resolve outside).
+- ✅ Read a file by workspace-relative path with `resolve()` + `is_relative_to` containment (blocks `..` and symlink/junction targets that resolve outside).
 - ✅ Content search with ignore list (`.git`, `.venv`, `venv`, `__pycache__`, `node_modules`) and a 100-match cap.
 - ✅ Missing-file and non-string path errors reported as failed results.
-- ⬜ Directory listing, file metadata, path-exists check.
-- ⬜ Line-range reads and bounded file content (READ currently returns the whole file, no size cap).
-- 🟡 Undecodable files now return a categorized `INVALID_ARGUMENTS` error instead of crashing; no binary sniffing or encoding options yet.
-- ⬜ Explicit symlink policy (document and test; containment currently only a side effect of `resolve()`).
-- ⬜ File-size and output-size limits.
-- ⬜ Controlled write tool (create/overwrite) with exact target, payload limits, expected-version/hash check, checksum confirmation, structured result.
-- ⬜ Concurrent-modification / conflict detection (return conflict instead of overwriting).
+- ✅ Directory listing (`repo.list_dir`), file metadata + path-exists (`repo.file_info`, missing path is success with `exists=false`).
+- ✅ Line-range reads (1-based inclusive, end clamped) and bounded content (`max_bytes` ≤ 1 MB, `truncated` flag, `data.sha256/total_bytes/total_lines`).
+- ✅ Binary detection (NUL in first 8 KB) and strict UTF-8 decoding return categorized `INVALID_ARGUMENTS`. Other encodings are not supported.
+- ✅ Explicit symlink policy (documented in `fs_tools.py`): resolved path must stay in the workspace; reads follow in-workspace links; writes refuse to go through a symlink; `list_dir` hides escaping links; `.git` is write-protected. Tested with a real directory junction on Windows; the 4 symlink-file tests skip when symlinks are unavailable.
+- ✅ File-size and output-size limits: reads refuse files >10 MB (`RESOURCE_LIMIT`), return ≤1 MB; writes ≤1 MB; list ≤1000 entries.
+- ✅ Controlled write tool `repo.write`: create new files, or overwrite only with a matching `expected_sha256`; atomic temp-file + `os.replace`; post-write checksum verification; structured result (`sha256`, `previous_sha256`, `created`, `changed_files`).
+- ✅ Conflict detection: stale or missing-file hash → `PATCH_CONFLICT` with expected/actual hashes; re-checked just before replace. A tiny race window between the re-check and `os.replace` remains (no OS-level file lock).
 - ⬜ Change notification to subsystems (Role 3 index) after writes.
-- ⬜ Filesystem unit tests for traversal, symlink, size and conflict cases.
+- ✅ Filesystem tests: `execution/tests/test_fs_tools.py` (32 tests).
 
 ### Phase 3 — Patch validation and application 🟡 PARTIAL
 
@@ -307,7 +307,7 @@ Fix these as early slices; they are small and risk-reducing.
 | 4 | Timeout kills only the direct child; output is unbounded | `execution/commands/runner.py` | Orphaned grandchildren; memory blow-up on noisy commands |
 | 5 | `CommandVerifier` uses `create_subprocess_shell` with string commands | `runtime/verification/command.py` | Shell injection surface; bypasses execution boundary (Role 1 owns, needs coordination) |
 | 6 | `apply_patch` uses default text encoding / newline handling | `execution/patches/apply.py` | Can corrupt CRLF files or non-UTF-8 platform defaults on Windows |
-| 7 | `READ` has no size limit; `SEARCH` skips undecodable files silently | `runtime/agent/real_executor.py` | Large files flood the model; silent partial results |
+| 7 | ~~`READ` has no size limit~~ **Fixed (slice C1)**; `SEARCH` still skips undecodable files silently and does not report skipped counts | `execution/gateway/fs_tools.py` | Silent partial search results |
 | 8 | `git_diff`/`git_status` use `check=True` and raise (gateway path categorizes; the helpers do not) | `execution/git/operations.py` | Non-repo or git failure surfaces as exceptions, not a categorized result |
 | 9 | Empty placeholder modules: `execution/git/status.py`, `execution/git/diff.py`, `execution/tests/runner.py`, `execution/worktrees/__init__.py`, `execution/patches/__init__.py` | `execution/` | Two layouts (`git/`, `worktrees/`, `testing/`, `tests/`) cause confusion; pick one |
 | 10 | ~~Root `pytest` collected the intentionally failing calculator fixture~~ **Fixed (slice A2)**: `testpaths = ["tests", "execution/tests"]` | `pyproject.toml` | Default suite is green |
@@ -334,8 +334,9 @@ sandbox → tests → verification → recovery/artifacts → integration/securi
 - 🟡 B4. Gateway timeout done; **cancellation** plumbing and process-tree handling pending.
 
 **Slice group C — Filesystem & patches**
-- C1. Read limits (size, line range, binary detect) → C2. list/metadata/exists → C3. symlink policy tests.
-- C4. Safe write tool with expected-hash conflict check (worktree only).
+- ✅ C1. Read limits (size, line range, binary detect) → ✅ C2. list/metadata/exists → ✅ C3. symlink policy tests.
+- ✅ C4. Safe write tool with expected-hash conflict check. (Not restricted to worktrees: it works in whatever workspace the gateway is bound to.)
+- ⬜ C4b. Notify Role 3 of changed files (needs the Role 3 interface); register `LIST_DIR`/`FILE_INFO`/`WRITE` in Role 1's `ToolRegistry` (needs Role 1 decision).
 - C5. Patch schema + parser (unified diff) → C6. validate-only → C7. apply single file with recovery artifact → C8. multi-file/create/delete → C9. provenance.
 
 **Slice group D — Git & worktrees**
@@ -367,8 +368,8 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 - [~] Normalize errors, output and execution metadata — `ExecutionResult` only; no taxonomy/extensions
 
 **B. Files and patches**
-- [~] Implement secure filesystem read operations — READ/SEARCH inside workspace; no limits/metadata/listing
-- [ ] Implement validated filesystem writes and conflict detection
+- [x] Implement secure filesystem read operations — bounded READ with line ranges, list, file info, SEARCH, symlink policy
+- [~] Implement validated filesystem writes and conflict detection — done in the gateway; change notification to Role 3 pending
 - [~] Implement patch validation and controlled application — single-file text replace
 - [ ] Preserve patch provenance and failure evidence
 
@@ -401,7 +402,7 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 - [ ] Coordinate index refreshes and worktrees with Role 3
 - [~] Complete security, failure-injection and performance tests — unit/integration only
 
-`[x]` done · `[~]` partial · `[ ]` pending — **1 / 12 / 13** of 26.
+`[x]` done · `[~]` partial · `[ ]` pending — **2 / 12 / 12** of 26.
 
 ---
 

@@ -70,7 +70,8 @@ ASEOS/
 │   └── llm/                  Provider-agnostic LLM client: base, api, mock, router, structured output
 ├── execution/                Role 4 — side effects
 │   ├── executor.py           execute_task(): worktree → patch → tests → diff → cleanup (+ events)
-│   ├── gateway/              ExecutionGateway (dispatcher), Tool/ToolSpec protocol, the six default tools
+│   ├── gateway/              ExecutionGateway (dispatcher), Tool/ToolSpec protocol, capabilities,
+│   │                         fs_tools.py (read/list/info/search/edit/write), tools.py (test, git diff, shell.run)
 │   ├── patches/apply.py      exact-text patch application, path-contained
 │   ├── git/                  operations.py (status, diff), worktree.py (create/remove);
 │   │                         status.py / diff.py are empty placeholders
@@ -93,7 +94,8 @@ ASEOS/
 
 - **Schemas** (`runtime/schemas/`): `Action` (`id`, `type`, `payload`), `ExecutionResult`, `Plan`, `Task`,
   `RepositoryContext`, `TestRunResult`, `TaskResult`.
-- **Action types:** `SEARCH`, `READ`, `EDIT`, `RUN_TEST`, `RUN_COMMAND`, `GIT_DIFF`.
+- **Action types:** `SEARCH`, `READ`, `EDIT`, `RUN_TEST`, `RUN_COMMAND`, `GIT_DIFF`, plus `LIST_DIR`, `FILE_INFO`, `WRITE`
+  (the latter three are implemented by the gateway but not yet in `ToolRegistry.default()`).
 - **Planning:** `Planner` produces a `Plan` of steps; `ActionGenerator` maps each step to an `Action`.
 - **Decisions:** a `DecisionEngine` (deterministic or LLM-backed, routed by `runtime/llm/router.py`) proposes the
   next `Decision`; `DecisionValidator` checks it structurally; `DecisionPolicy` returns `ALLOW` or
@@ -127,7 +129,10 @@ Two implementations exist:
 
 | Action (tool id) | Behaviour | Safety |
 | ------ | --------- | ------ |
-| `READ` (`repo.read`) | Reads a UTF-8 file by workspace-relative path | Resolved path must stay inside the workspace |
+| `READ` (`repo.read`) | Reads a UTF-8 file (optional line range); ≤1 MB returned, `sha256` for versioning | Containment; binary/oversize files rejected |
+| `LIST_DIR` (`repo.list_dir`) | Lists one directory, non-recursive | Containment; escaping links hidden |
+| `FILE_INFO` (`repo.file_info`) | Exists/type/size/mtime/sha256/binary | Containment |
+| `WRITE` (`repo.write`) | Create a file, or overwrite only when `expected_sha256` matches; atomic + verified | Containment; no write through symlinks; `.git` denied; ≤1 MB |
 | `SEARCH` (`repo.search`) | Case-insensitive text search; ≤100 matches; skips `.git`, `.venv`, `venv`, `__pycache__`, `node_modules` | Same containment; undecodable files skipped |
 | `EDIT` (`patch.apply`) | `apply_patch(workspace, payload)` with `{file, old, new}` | Path containment; target must be non-empty and match exactly once |
 | `RUN_TEST` (`test.run`) | `run_tests(workspace)` → `python -m pytest`, 30 s | Fixed command, no caller-supplied argv |
@@ -182,7 +187,7 @@ What is **not** provided (do not assume it):
 
 - A real sandbox — worktrees isolate *source*, not processes, network, secrets or the rest of the filesystem.
 - Command policy, environment scrubbing, output caps, process-tree termination, cancellation.
-- Conflict detection for concurrent edits, patch recovery, crash recovery, concurrency locks.
+- Patch recovery, crash recovery, file locking, and notification of other subsystems after writes (`repo.write` does detect stale-version conflicts).
 - Redaction, artifact retention or an execution audit trail beyond runtime events.
 - `CommandVerifier` (Role 1) runs shell command strings directly and does not go through the execution boundary.
 
@@ -247,7 +252,8 @@ artifacts, command policy and sandboxing — will be added in slices so the runt
   `tests/agent/test_real_executor_integration.py`.
 - Role 1 suites: `tests/agent`, `decision`, `events`, `llm`, `planner`, `schemas`, `state`, `task`, `tools`,
   `verification`.
-- Baseline at time of writing: **240 passed**. `pyproject.toml` `testpaths` limits default collection to `tests/`
+- Baseline at time of writing: **268 passed, 4 skipped** (symlink-file tests skip when the OS does not allow
+  creating symlinks; a Windows directory-junction test covers the same escape). `pyproject.toml` `testpaths` limits default collection to `tests/`
   and `execution/tests/`; the deliberately broken `fixtures/repositories/calculator` test (which the demo fixes)
   is not collected.
 - Async tests use `pytest-asyncio` in strict mode; `pythonpath = ["."]`.

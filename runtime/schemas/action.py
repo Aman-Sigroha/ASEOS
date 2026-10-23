@@ -10,6 +10,9 @@ ActionType = Literal[
     "RUN_TEST",
     "RUN_COMMAND",
     "GIT_DIFF",
+    "LIST_DIR",
+    "FILE_INFO",
+    "WRITE",
 ]
 
 

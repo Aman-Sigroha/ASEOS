@@ -82,6 +82,11 @@ def test_default_tools_declare_canonical_names_and_read_only_flags():
     assert specs["EDIT"].name == "patch.apply"
     assert specs["RUN_TEST"].name == "test.run"
     assert specs["GIT_DIFF"].name == "git.diff"
+    assert specs["LIST_DIR"].name == "repo.list_dir"
+    assert specs["FILE_INFO"].name == "repo.file_info"
+    assert specs["WRITE"].name == "repo.write"
+    assert specs["WRITE"].read_only is False
+    assert specs["LIST_DIR"].read_only is True
     assert specs["RUN_COMMAND"].name == "shell.run"
     assert specs["READ"].read_only is True
     assert specs["EDIT"].read_only is False
@@ -208,7 +213,8 @@ async def test_successful_edit_reports_changed_files(tmp_path):
     )
 
     assert result.success is True
-    assert result.data == {"changed_files": ["f.py"]}
+    assert result.data["changed_files"] == ["f.py"]
+    assert len(result.data["sha256"]) == 64
 
 
 @pytest.mark.asyncio
