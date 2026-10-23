@@ -4,9 +4,9 @@ Execution, Git, worktrees, command running, sandboxing and testing.
 
 - **Status snapshot date:** 2026-10-23
 - **Branch audited:** `execution` (HEAD `a91605f`)
-- **Test baseline:** `python -m pytest -q` → 483 passed, 5 skipped (symlink/POSIX-mode tests skip where unavailable), 0 failed (default `testpaths` now exclude the
+- **Test baseline:** `python -m pytest -q` → 633 passed, 5 skipped (symlink/POSIX-mode tests skip where unavailable), 0 failed (default `testpaths` now exclude the
   intentionally failing `fixtures/` repo). Before the first slices it was 202 passed + 1 fixture failure.
-- **Progress log:** slices A1–A3, B1–B2, C1–C4 (Phase 2 filesystem) C5–C9 (Phase 3 patches) D1–D3, D9 (Phase 4 Git) and D4–D8, D11 (Phase 5 worktrees) are done; B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
+- **Progress log:** slices A1–A3, B1–B2, C1–C4 (Phase 2 filesystem) C5–C9 (Phase 3 patches) D1–D3, D9 (Phase 4 Git) D4–D8, D11 (Phase 5 worktrees) and E1–E5 (Phase 6 commands) are done; B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
 
 Companion documents: [ARCHITECTURE.md](ARCHITECTURE.md) (how the system fits together),
 [API_CONTRACTS.md](API_CONTRACTS.md) (baseline runtime ↔ execution contract),
@@ -61,7 +61,7 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 | 3 | Patch validation & application | 🟡 PARTIAL | Unified-diff validate/apply (create/modify/delete, multi-file, base hashes, rollback, reverse) done; persisted recovery artifacts + task-level provenance pending |
 | 4 | Git status, diff & operations | 🟡 PARTIAL | Structured status/diff/info and scoped stage/commit/branch/discard done; worktree-lifecycle protection of user work (Phase 5) pending |
 | 5 | Worktrees & task isolation | 🟡 PARTIAL | Registry, base commits, safe/backed-up removal, locking, reconciliation, gateway tools done; retention policy and live-owner leases pending |
-| 6 | Controlled command execution | 🟡 PARTIAL | `run_command` with list args + timeout; no env policy, caps, tree-kill, cancel |
+| 6 | Controlled command execution | 🟡 PARTIAL | Hardened runner (env policy, output bounds, verified tree kill, cancel, limits), command policy and `shell.run` done; POSIX paths unverified, no sandbox yet |
 | 7 | Sandboxing & execution security | ⬜ PENDING | Only worktree isolation + `RUN_COMMAND` disabled |
 | 8 | Test discovery & execution | 🟡 PARTIAL | Hardcoded `python -m pytest`; no discovery or report parsing |
 | 9 | Deterministic verification evidence | 🟡 PARTIAL | Role 1 verifier exists; not tied to code version/artifacts |
@@ -70,7 +70,7 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 | 12 | Cross-role integration | 🟡 PARTIAL | Role 1 wired in; Role 2 and Role 3 pending |
 | 13 | Security, testing & performance qualification | 🟡 PARTIAL | Unit/integration tests only |
 
-**Role 4 completion checklist: 6 ✅ done · 11 🟡 partial · 9 ⬜ pending (of 26)** (an item flips only when its full acceptance criterion is met). See [Section 4](#4-role-4-completion-checklist).
+**Role 4 completion checklist: 9 ✅ done · 11 🟡 partial · 6 ⬜ pending (of 26)** (an item flips only when its full acceptance criterion is met). See [Section 4](#4-role-4-completion-checklist).
 
 ---
 
@@ -184,18 +184,19 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 
 *Completion criterion: approved commands run against the correct workspace; output and errors are captured; timeouts/cancellations leave no uncontrolled processes.*
 
-- ✅ `run_command(argv: list[str], cwd, timeout)` — direct invocation (no shell), UTF-8 decoding with replacement, captures stdout/stderr/exit code, statuses `PASS`/`FAIL`/`TIMEOUT`/`ERROR` (`execution/commands/runner.py`). Tests in `test_runner.py`.
-- ✅ General `RUN_COMMAND` is refused by `RealActionExecutor` until a policy exists.
-- ⬜ Validate cwd is inside an approved workspace/worktree (currently any `cwd` is accepted).
-- ⬜ Command policy (allow-list / categories / risk) enforced in trusted code.
-- ⬜ Controlled environment variables (currently inherits the full parent environment).
-- ⬜ Output caps + truncation metadata + full-output artifact reference.
-- ⬜ Process-tree termination on timeout (`subprocess.run` kills only the direct child); verify no orphans.
-- ⬜ Cancellation and runtime-shutdown handling.
-- ⬜ `duration_ms` in the runner result; distinguish missing executable vs invalid cwd vs non-zero exit.
-- ⬜ Streaming logs (nice-to-have; keep distinct from completion).
-- ⬜ Cross-platform (Windows/POSIX) process tests.
-- 🟡 `runtime/verification/command.py` (Role 1) runs `create_subprocess_shell` with string commands and `process.kill()` — shell injection and tree-kill concerns; coordinate with Role 1 to route it through the command runner/policy.
+- ✅ One hardened runner, `execution/commands/process.py::run_process`, behind everything that starts a process (`shell.run`, `test.run`, and the trusted `run_command` helper): argv only (never a shell), stdin closed, explicit executable resolution against the *controlled* `PATH`, UTF-8 decoding with replacement.
+- ✅ Working directory must exist and sit inside the workspace (`invalid_cwd` otherwise); symlink/junction escapes are resolved first.
+- ✅ Environment policy (`commands/env.py`): nothing is inherited by default. A small allow-list of platform variables passes (`PATH`, `SYSTEMROOT`, `HOME`, ...) minus anything that looks like a secret (`*KEY*`, `*TOKEN*`, `*SECRET*`, `*PASSW*`, ...); code-loading variables (`PYTHONPATH`, `NODE_OPTIONS`, `LD_PRELOAD`) never pass. Callers may add only `CI`, `NODE_ENV`, `PYTHONHASHSEED`, `PYTHONDONTWRITEBYTECODE`, `TZ`, `LANG`, `LC_ALL`, `FORCE_COLOR`, `NO_COLOR`. Each run gets its own `TEMP`/`TMP`/`TMPDIR`, deleted afterwards. Secret values from the parent environment are redacted from captured output.
+- ✅ Output is bounded in memory (first 100 KB + last 100 KB per stream, with an omitted-bytes marker) and spooled in full to a log file when larger (capped at 100 MB, `spool_truncated` says if hit). The result carries exact byte totals, truncation flags and `ArtifactRef`s (`command_output`) pointing at the logs. A process that floods stdout and stderr cannot stall or exhaust the runner.
+- ✅ Process-tree termination, verified: on timeout, cancellation or orphaned children the whole tree is killed and the result reports `process_tree` (`mechanism`, `leftover`). Windows: Job Object (created suspended, assigned, then resumed — no race), kill-on-close, `leftover` is the job's real active-process count. POSIX: own session / process group, SIGTERM then SIGKILL, `leftover` probed with `killpg(0)`. Processes still running after the main process exits are treated as orphans and killed.
+- ✅ Resource limits where the OS gives them: Windows Job Object caps the active-process count (default 256) and per-process memory (default 4 GiB); POSIX (Linux) disables core dumps and caps file size via `prlimit`. See limitations below.
+- ✅ Cancellation and shutdown end to end: `ToolContext.cancel` is set by the gateway on timeout, on `gateway.cancel(action_id)`, `cancel_all()`, `await gateway.shutdown()` and when the awaiting asyncio task is cancelled. The gateway timeout no longer orphans the worker: it asks the tool to stop, waits for it, and returns `TIMEOUT` with the partial output (`CANCELLED` for explicit cancels).
+- ✅ Failure kinds are distinguished: missing executable, invalid cwd, invalid environment, unsafe batch-file argument, start failure, non-zero exit, timeout, cancellation, output overflow. Windows `.cmd`/`.bat` targets reject arguments containing shell metacharacters.
+- ✅ Command policy (`commands/policy.py`), default-deny, enforced in trusted code inside `shell.run`: bare command names only; shells, destructive utilities, network clients, container tools and `git` (use `git.*`) are refused with a reason; allowed forms exist for `python -m pytest|unittest|mypy|ruff|flake8|black|compileall`, `pytest`, `ruff`/`black` (no fixing/formatting in place), `mypy`, `flake8`, `npm|pnpm|yarn` (`test`, `run test|lint|build|typecheck|check`), `node --version`, `tsc --noEmit`, `eslint` (no `--fix`), `mvn` lifecycle goals, `cargo test|check|clippy|build|doc|fmt --check`, `go test|vet|build`. Inline code (`-c`), arbitrary scripts, pytest plugins (`-p`, `-o`) are refused. Every path-like argument must resolve inside the workspace; URLs are refused. Installs (`pip install`, `npm install`) are classified `install`/high risk and need `shell.network`, which is not granted by default.
+- ✅ `shell.run` is now implemented: `{command: argv list | plain string, cwd, timeout_seconds ≤ 600, env}`. Strings are split like POSIX quoting but never run by a shell; pipes, redirects and `&&` are rejected. Needs `shell.run` (not granted by default). Results carry `data.policy`, `data.process_tree`, output byte counts and artifact refs.
+- ✅ `test.run` now goes through the same runner, so it also gets the scrubbed environment, tree kill, output bounds and cancellation.
+- ✅ Tests: `test_process_runner.py` (38), `test_command_policy.py` (84), `test_shell_tool.py` (28) — real processes, real grandchildren, verified dead afterwards.
+- 🟡 Not covered / honest limits: **the policy decides what may start, not what an allowed program does** — a test suite is arbitrary code and can still read files, use the network or spawn processes within the limits (that is Phase 7). `shell.network` gates *install-type commands* only; network access is not blocked. `HOME`/`USERPROFILE` are passed through, so tools can read user-level config (`.npmrc`, `.pypirc`). The POSIX code paths (process group, `prlimit`) are written and unit-tested for logic but were **not run on a POSIX machine** in this environment. POSIX has no memory or process-count limit yet (cgroups/containers are Phase 7). Command logs are plain files in the system temp directory with no retention until Phase 10. Streaming logs are not implemented (results are returned when the command ends). `runtime/verification/command.py` (Role 1) still uses `create_subprocess_shell` and has not been moved onto this runner.
 
 ### Phase 7 — Sandboxing and execution security ⬜ PENDING
 
@@ -305,8 +306,8 @@ Fix these as early slices; they are small and risk-reducing.
 | - | ----- | -------- | -------------- |
 | 1 | ~~`task_id` not validated before being joined into a path and branch name~~ **Fixed (slice A1)** | `execution/git/worktree.py` | Was: `../` could place a worktree (and a later `--force` removal) outside `.aseos_worktrees` |
 | 2 | ~~`execute_task` always removed its worktree with `--force` and `branch -D`~~ **Fixed (Phase 5)**: work is preserved; removal refuses to lose it | `execution/executor.py`, `worktrees/manager.py` | Was: deleted the agent's changes before anyone reviewed them |
-| 3 | `run_command` accepts any `cwd` and inherits the full environment | `execution/commands/runner.py` | No workspace enforcement; secrets leak into child processes |
-| 4 | Timeout kills only the direct child; output is unbounded | `execution/commands/runner.py` | Orphaned grandchildren; memory blow-up on noisy commands |
+| 3 | ~~`run_command` accepted any `cwd` and inherited the full environment~~ **Fixed (Phase 6)**: scrubbed environment, cwd validation available via `workspace=` | `execution/commands/` | Was: secrets leaked into child processes |
+| 4 | ~~Timeout killed only the direct child; output was unbounded~~ **Fixed (Phase 6)**: whole tree killed and verified; output bounded and spooled | `execution/commands/process.py` | — |
 | 5 | `CommandVerifier` uses `create_subprocess_shell` with string commands | `runtime/verification/command.py` | Shell injection surface; bypasses execution boundary (Role 1 owns, needs coordination) |
 | 6 | `apply_patch` (legacy replace used by `execute_task` and `patch.replace`) uses default text encoding / newline handling; the new unified-diff engine does not have this problem | `execution/patches/apply.py` | Can corrupt CRLF files or non-UTF-8 platform defaults on Windows |
 | 7 | ~~`READ` has no size limit~~ **Fixed (slice C1)**; `SEARCH` still skips undecodable files silently and does not report skipped counts | `execution/gateway/fs_tools.py` | Silent partial search results |
@@ -354,7 +355,10 @@ sandbox → tests → verification → recovery/artifacts → integration/securi
 - ✅ D11. `execute_task` uses the structured diff (`mode=base`, untracked included).
 
 **Slice group E — Commands & sandbox**
-- E1. cwd enforcement + env policy. E2. Output caps + truncation metadata. E3. Process-tree kill + orphan test (Windows and POSIX). E4. Cancellation. E5. Command policy + enable `RUN_COMMAND` for an allow-list only.
+- ✅ E1. cwd enforcement + env policy. ✅ E2. Output caps + truncation metadata. 🟡 E3. Process-tree kill + orphan test (done and verified on Windows; POSIX written but **not run** here). ✅ E4. Cancellation (+ gateway shutdown). ✅ E5. Command policy + `RUN_COMMAND` for an allow-list only.
+- ⬜ E3b. Run the process tests on Linux/macOS (CI) and fix whatever they reveal.
+- ⬜ E9. Route Role 1's `CommandVerifier` through `run_process` / the policy (needs Role 1).
+- ⬜ E10. Streaming logs for long commands (live output separate from completion).
 - E6. `SECURITY_MODEL.md` + threat model. E7. Isolation strategy decision (ADR). E8. First isolation layer (limits/env/network) + sandbox tests.
 
 **Slice group F — Tests & verification**
@@ -389,9 +393,9 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 - [~] Add safe cleanup, recovery and task isolation — safe removal, backups, reconcile and locking done; retention policy and live-owner leases pending
 
 **D. Commands and sandbox**
-- [~] Implement bounded process execution — list args, timeout; no output/resource bounds
-- [~] Add timeouts, cancellation and child-process cleanup — timeout only
-- [ ] Define command/environment permissions
+- [x] Implement bounded process execution — argv only, scrubbed env, bounded + spooled output, Windows job limits
+- [x] Add timeouts, cancellation and child-process cleanup — tree kill verified on Windows; gateway cancel/shutdown
+- [x] Define command/environment permissions — default-deny command policy, env allow-list, capability-gated installs
 - [ ] Implement and test the selected isolation strategy
 
 **E. Testing and verification**
@@ -411,7 +415,7 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 - [ ] Coordinate index refreshes and worktrees with Role 3
 - [~] Complete security, failure-injection and performance tests — unit/integration only
 
-`[x]` done · `[~]` partial · `[ ]` pending — **6 / 11 / 9** of 26.
+`[x]` done · `[~]` partial · `[ ]` pending — **9 / 11 / 6** of 26.
 
 ---
 

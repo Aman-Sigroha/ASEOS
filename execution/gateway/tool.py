@@ -1,3 +1,4 @@
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -6,7 +7,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from runtime.schemas.action import ActionType
-from runtime.schemas.execution import ErrorCategory
+from runtime.schemas.execution import ArtifactRef, ErrorCategory
 
 
 @dataclass(frozen=True)
@@ -16,6 +17,9 @@ class ToolContext:
     workspace: Path
     action_id: str = ""
     capabilities: frozenset[str] = frozenset()
+    # Set by the gateway on cancellation, timeout or shutdown. Tools that
+    # run for a while must watch it and stop (and clean up) promptly.
+    cancel: threading.Event = field(default_factory=threading.Event)
 
 
 @dataclass(frozen=True)
@@ -41,6 +45,7 @@ class ToolOutput:
     exit_code: int | None = 0
     data: dict[str, Any] = field(default_factory=dict)
     truncated: bool = False
+    artifacts: list[ArtifactRef] = field(default_factory=list)
 
 
 class ToolError(Exception):
@@ -55,6 +60,7 @@ class ToolError(Exception):
         stderr: str | None = None,
         exit_code: int | None = None,
         data: dict[str, Any] | None = None,
+        artifacts: list[ArtifactRef] | None = None,
     ) -> None:
         super().__init__(message)
         self.category = category
@@ -63,6 +69,7 @@ class ToolError(Exception):
         self.stderr = message if stderr is None else stderr
         self.exit_code = exit_code
         self.data = data or {}
+        self.artifacts = artifacts or []
 
 
 class Tool(ABC):

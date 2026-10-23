@@ -1,4 +1,5 @@
 import asyncio
+import threading
 import time
 from pathlib import Path
 
@@ -27,6 +28,7 @@ class ExecutionGateway:
         workspace_path: str,
         tools: list[Tool] | None = None,
         granted_capabilities: frozenset[str] | set[str] | None = None,
+        stop_grace_seconds: float = 10.0,
     ) -> None:
         self.workspace = Path(workspace_path).resolve()
 
@@ -36,6 +38,9 @@ class ExecutionGateway:
             )
 
         self._tools: dict[str, Tool] = {}
+        self.stop_grace_seconds = stop_grace_seconds
+        self._running: dict[str, list[threading.Event]] = {}
+        self._running_lock = threading.Lock()
         self.granted_capabilities = frozenset(granted_capabilities or ())
 
         for tool in tools or []:
@@ -113,25 +118,131 @@ class ExecutionGateway:
             ) from exc
 
     async def _run(self, tool: Tool, args, action: Action) -> ToolOutput:
+        cancel = threading.Event()
         context = ToolContext(
             workspace=self.workspace,
             action_id=action.id,
             capabilities=self.granted_capabilities,
+            cancel=cancel,
+        )
+        self._track(action.id, cancel)
+        future = asyncio.ensure_future(
+            asyncio.to_thread(tool.run, context, args)
         )
 
         try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(tool.run, context, args),
-                timeout=tool.spec.timeout_seconds,
+            done, _ = await asyncio.wait(
+                {future}, timeout=tool.spec.timeout_seconds
             )
-        except asyncio.TimeoutError as exc:
-            # The worker thread cannot be interrupted; tools that spawn
-            # processes must enforce their own timeouts.
+
+            if future in done:
+                return future.result()
+
+            # Ask the tool to stop (it kills any process tree it started),
+            # then collect whatever it managed to produce.
+            cancel.set()
+            done, _ = await asyncio.wait(
+                {future}, timeout=self.stop_grace_seconds
+            )
+            message = (
+                f"Tool '{tool.spec.name}' exceeded "
+                f"{tool.spec.timeout_seconds:g}s."
+            )
+
+            if future in done:
+                error = future.exception()
+
+                if error is None:
+                    late = future.result()
+                    raise ToolError(
+                        "TIMEOUT",
+                        message + " It finished after the deadline.",
+                        stdout=late.stdout,
+                        stderr=late.stderr or message,
+                        exit_code=late.exit_code,
+                        data=late.data,
+                    )
+
+                if isinstance(error, ToolError):
+                    raise ToolError(
+                        "TIMEOUT",
+                        message,
+                        stdout=error.stdout,
+                        stderr=error.stderr or message,
+                        exit_code=error.exit_code,
+                        data=error.data,
+                    ) from error
+
+                raise error
+
             raise ToolError(
                 "TIMEOUT",
-                f"Tool '{tool.spec.name}' exceeded "
-                f"{tool.spec.timeout_seconds:g}s.",
-            ) from exc
+                message + " It did not stop when asked; its worker thread "
+                "may still be running.",
+            )
+        except asyncio.CancelledError:
+            cancel.set()
+            await asyncio.wait({future}, timeout=self.stop_grace_seconds)
+            raise
+        finally:
+            self._untrack(action.id, cancel)
+
+    # ------------------------------------------------ cancellation / shutdown
+
+    def _track(self, action_id: str, event: threading.Event) -> None:
+        with self._running_lock:
+            self._running.setdefault(action_id, []).append(event)
+
+    def _untrack(self, action_id: str, event: threading.Event) -> None:
+        with self._running_lock:
+            events = self._running.get(action_id, [])
+
+            if event in events:
+                events.remove(event)
+
+            if not events:
+                self._running.pop(action_id, None)
+
+    def running(self) -> list[str]:
+        """Ids of actions currently executing."""
+
+        with self._running_lock:
+            return list(self._running)
+
+    def cancel(self, action_id: str) -> bool:
+        """Ask a running action to stop. Returns False if it is not running.
+
+        Safe to call from any thread. The action's result then reports
+        `error_category="CANCELLED"` with whatever output it had produced.
+        """
+
+        with self._running_lock:
+            events = list(self._running.get(action_id, []))
+
+        for event in events:
+            event.set()
+
+        return bool(events)
+
+    def cancel_all(self) -> int:
+        with self._running_lock:
+            events = [e for group in self._running.values() for e in group]
+
+        for event in events:
+            event.set()
+
+        return len(events)
+
+    async def shutdown(self, timeout: float = 10.0) -> bool:
+        """Cancel everything and wait for it to finish. True if all stopped."""
+
+        self.cancel_all()
+        deadline = time.monotonic() + timeout
+
+        while self.running() and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+
+        return not self.running()
 
     @staticmethod
     def _result(
@@ -154,6 +265,7 @@ class ExecutionGateway:
                 tool=tool_name,
                 error_category=error.category,
                 data=error.data,
+                artifacts=error.artifacts,
             )
 
         assert output is not None
@@ -167,4 +279,5 @@ class ExecutionGateway:
             tool=tool_name,
             truncated=output.truncated,
             data=output.data,
+            artifacts=output.artifacts,
         )

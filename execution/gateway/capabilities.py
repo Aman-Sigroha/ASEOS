@@ -8,8 +8,9 @@ CAP_WORKTREE_MANAGE = "worktree.manage"
 CAP_WORKTREE_DISCARD = "worktree.discard"
 CAP_TEST_RUN = "test.run"
 CAP_SHELL_RUN = "shell.run"
+CAP_SHELL_NETWORK = "shell.network"
 
-# Capabilities granted by default. shell.run, fs.delete, git.write,
+# Capabilities granted by default. shell.run, shell.network, fs.delete, git.write,
 # git.discard, worktree.manage and worktree.discard are intentionally absent:
 # they need an explicit grant.
 DEFAULT_CAPABILITIES = frozenset(

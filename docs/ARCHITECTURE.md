@@ -73,12 +73,13 @@ ASEOS/
 │   ├── gateway/              ExecutionGateway (dispatcher), Tool/ToolSpec protocol, capabilities,
 │   │                         fs_tools.py (read/list/info/search/replace/write), patch_tools.py (patch.validate/apply),
 │   │                         git_tools.py (git.status/diff/info/stage/commit/branch_create/discard),
-│   │                         tools.py (test.run, shell.run, default_tools)
+│   │                         command_tools.py (shell.run, test.run), tools.py (default_tools)
 │   ├── patches/              unified.py (diff parser), engine.py (plan/validate/apply/rollback/report),
 │   │                         fileio.py (atomic write), apply.py (legacy exact-text replace used by execute_task)
 │   ├── git/                  operations.py (status, diff), worktree.py (create/remove);
 │   │                         status.py / diff.py are empty placeholders
-│   ├── commands/runner.py    run_command(argv, cwd, timeout)
+│   ├── commands/             process.py (hardened runner: tree kill, limits, cancel), env.py, capture.py,
+│   │                         policy.py (default-deny command policy), runner.py (trusted-caller wrapper)
 │   ├── testing/runner.py     run_tests(worktree) → python -m pytest
 │   ├── tests/                unit tests for the execution modules (+ empty runner.py placeholder)
 │   ├── worktrees/            manager.py (lifecycle), store.py (registry + repo lock), record.py, ids.py
@@ -142,9 +143,9 @@ Two implementations exist:
 | `EDIT` (`patch.replace`) | Legacy `apply_patch(workspace, payload)` with `{file, old, new}` | Path containment; target must be non-empty and match exactly once; protected paths denied |
 | `VALIDATE_PATCH` (`patch.validate`) | Checks a unified diff against the workspace; writes nothing | Containment, protected paths, size limits, base hashes, hunk context |
 | `APPLY_PATCH` (`patch.apply`) | Applies a unified diff (create/modify/delete, multi-file); validates all files first, atomic per file, rolls back on failure, reports the diff actually produced; `reverse=true` undoes one | As above; deleting needs the `fs.delete` capability (not granted by default) |
-| `RUN_TEST` (`test.run`) | `run_tests(workspace)` → `python -m pytest`, 30 s | Fixed command, no caller-supplied argv |
+| `RUN_TEST` (`test.run`) | `python -m pytest` through the hardened runner, 120 s | Fixed command, no caller-supplied argv; scrubbed env, tree kill, bounded output |
 | `GIT_DIFF` (`git.diff`) | `git diff --` via the command runner, 10 s | Fixed argv |
-| `RUN_COMMAND` (`shell.run`) | **Denied** — capability `shell.run` is never granted by default | Disabled until a command policy exists |
+| `RUN_COMMAND` (`shell.run`) | One allowed program (argv, never a shell) under the command policy | Needs `shell.run` (not granted by default); default-deny policy, path arguments confined to the workspace, scrubbed env, bounded output, tree kill on timeout/cancel |
 
 Each tool runs in `asyncio.to_thread` under a per-tool timeout. Failures never raise to the runtime: they become a failed
 `ExecutionResult` with an `error_category` (e.g. `INVALID_ARGUMENTS`, `PERMISSION_DENIED`, `PATCH_CONFLICT`,
@@ -176,7 +177,8 @@ isolated worktree and showing the passing tests and diff.
 | `execution/patches/apply.py` | `apply_patch(worktree, patch) -> dict` | `status` `PASS`/`ERROR` + message |
 | `execution/git/operations.py` | `git_status`, `git_diff` | Status: branch/clean/modified; diff: unstaged only |
 | `execution/git/worktree.py` | `create_worktree`, `remove_worktree` | `WORKTREE_ROOT = ".aseos_worktrees"` |
-| `execution/commands/runner.py` | `run_command(argv, cwd, timeout=30)` | No shell; `PASS`/`FAIL`/`TIMEOUT`/`ERROR` |
+| `execution/commands/process.py` | `run_process(argv, cwd, ...)` | Hardened runner: `PASS`/`FAIL`/`TIMEOUT`/`CANCELLED`/`ERROR`, process-tree kill, bounded output, Windows job limits |
+| `execution/commands/runner.py` | `run_command(argv, cwd, timeout=30)` | Trusted-caller wrapper over `run_process` (no command policy) |
 | `execution/testing/runner.py` | `run_tests(worktree)` | Wraps the command runner |
 
 ## 7. Safety boundary (today)
@@ -187,13 +189,13 @@ What is enforced:
 - Capability checks in the gateway before arguments are validated; `shell.run` is never granted by default.
 - Worktree `task_id` is validated and worktree paths are confined to `.aseos_worktrees`.
 - Patches must match exactly once; ambiguous or missing targets are rejected.
-- Commands are invoked as argv lists (no shell) with a timeout; `RUN_COMMAND` from the agent is disabled.
+- Commands are invoked as argv lists (no shell) with a scrubbed environment, bounded output, a timeout and cancellation; the whole process tree is killed and verified. Agent commands pass a default-deny policy and need the `shell.run` capability.
 - Source changes in `execute_task` happen in a separate Git worktree, not the main checkout.
 
 What is **not** provided (do not assume it):
 
 - A real sandbox — worktrees isolate *source*, not processes, network, secrets or the rest of the filesystem.
-- Command policy, environment scrubbing, output caps, process-tree termination, cancellation.
+- Anything beyond *starting* only allowed programs: what a test suite or build script then does (network, files outside the workspace, user-level config via `HOME`) is not restricted; POSIX process handling is untested here; no memory/process limits off Windows.
 - Patch recovery, crash recovery, file locking, and notification of other subsystems after writes (`repo.write` does detect stale-version conflicts).
 - Redaction, artifact retention or an execution audit trail beyond runtime events.
 - `CommandVerifier` (Role 1) runs shell command strings directly and does not go through the execution boundary.
@@ -259,7 +261,7 @@ artifacts, command policy and sandboxing — will be added in slices so the runt
   `tests/agent/test_real_executor_integration.py`.
 - Role 1 suites: `tests/agent`, `decision`, `events`, `llm`, `planner`, `schemas`, `state`, `task`, `tools`,
   `verification`.
-- Baseline at time of writing: **483 passed, 5 skipped** (symlink-file and POSIX-mode tests skip when the OS does not allow
+- Baseline at time of writing: **633 passed, 5 skipped** (symlink-file and POSIX-mode tests skip when the OS does not allow
   them; a Windows directory-junction test covers the same escape). `pyproject.toml` `testpaths` limits default collection to `tests/`
   and `execution/tests/`; the deliberately broken `fixtures/repositories/calculator` test (which the demo fixes)
   is not collected.

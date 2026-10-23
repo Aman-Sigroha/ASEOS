@@ -29,7 +29,7 @@ The workspace is trusted gateway context (`ToolContext`); it is never taken from
 | `patch.validate` | `VALIDATE_PATCH` | `fs.read` | yes | `{patch, base?, reverse?}`; checks a unified diff against the workspace, writes nothing; see §2.2 |
 | `patch.apply` | `APPLY_PATCH` | `fs.write` (+ `fs.delete` to delete files) | no | `{patch, base?, reverse?}`; see §2.2 |
 | `repo.write` | `WRITE` | `fs.write` | no | `{path, content, expected_sha256?}`; see §2.1 |
-| `test.run` | `RUN_TEST` | `test.run` | no | `python -m pytest` |
+| `test.run` | `RUN_TEST` | `test.run` | no | `python -m pytest` through the hardened runner |
 | `git.status` | `GIT_STATUS` | `git.read` | yes | `{max_entries?}`; structured branch/staged/unstaged/untracked/conflicted/state |
 | `git.diff` | `GIT_DIFF` | `git.read` | yes | `{mode='unstaged'\|'staged'\|'base', base?, paths?, include_untracked=true, max_bytes?, context?}`; stdout is the diff text, `data` has base, files, stats; see §2.3 |
 | `git.info` | `GIT_INFO` | `git.read` | yes | `{max_branches?, max_commits?}`; identity, HEAD, branches, recent commits, relevant config |
@@ -41,7 +41,7 @@ The workspace is trusted gateway context (`ToolContext`); it is never taken from
 | `git.worktree.list` | `WORKTREE_LIST` | `git.read` | yes | `{include_removed?, assess=true}`; records plus live assessment |
 | `git.worktree.remove` | `WORKTREE_REMOVE` | `worktree.manage` | no | `{worktree_id, discard_unreviewed?}`; see §2.4 |
 | `git.worktree.reconcile` | `WORKTREE_RECONCILE` | `worktree.manage` | no | `{}`; report only, deletes nothing |
-| `shell.run` | `RUN_COMMAND` | `shell.run` | no | **Not granted by default; always denied** until a command policy exists |
+| `shell.run` | `RUN_COMMAND` | `shell.run` (+ `shell.network` for installs) | no | `{command: argv list \| string, cwd='.', timeout_seconds?, env?}`; policy-checked; see §2.5 |
 
 Tool ids use the planned namespaces (`repo.*`, `git.*`, `shell.*`, `test.*`, `patch.*`). The runtime's
 `ToolRegistry` still uses the short names (`read`, `edit`, …) keyed by action type; `ExecutionResult.tool` reports the
@@ -88,7 +88,17 @@ canonical id. Aligning Role 1's registry names is an open item.
 - **Reconcile:** `data` lists `ok`, `missing`, `recovered`, `interrupted`, `detached_dirs`, `orphan_dirs`, `unrecorded_git_worktrees`, `prune_candidates`, `corrupt_records`. Only record statuses change; nothing is deleted.
 - **Locking:** concurrent creates/removes are serialized; a busy registry returns `GIT_FAILURE` with `data.lock_conflict=true`.
 
-Default granted capabilities: `fs.read`, `fs.write`, `git.read`, `test.run`. Not granted by default: `fs.delete`, `git.write`, `git.discard`, `worktree.manage`, `worktree.discard`, `shell.run`.
+### 2.5 Command semantics (`shell.run`, `test.run`)
+
+- **No shell, ever.** `command` is an argv list, or a string split with POSIX quoting rules; pipes, redirects, `&&`, `;` are `INVALID_ARGUMENTS`. The program is resolved from a controlled `PATH`; commands must be bare names.
+- **Policy first, default-deny** (`PERMISSION_DENIED`, reason in `stderr`, rule/category/risk in `data.policy`). Refused outright: shells, destructive utilities, network clients, container tools, `git` (use `git.*`), inline code (`-c`), arbitrary scripts, pytest plugins. Allowed forms: tests, linters, type checkers and builds for Python, Node, Maven, Cargo and Go (see `commands/policy.py`). Every path-like argument must resolve inside the workspace; URLs are refused. Installs need `shell.network`.
+- **Environment:** nothing inherited by default; secret-looking variables never pass; callers may set only `CI`, `NODE_ENV`, `PYTHONHASHSEED`, `PYTHONDONTWRITEBYTECODE`, `TZ`, `LANG`, `LC_ALL`, `FORCE_COLOR`, `NO_COLOR`. Per-run temp dir. Secret values are redacted from output.
+- **Limits:** `timeout_seconds` default 60, max 600. Output returned inline is the first and last 100 KB per stream (`truncated`, `data.stdout_bytes/stderr_bytes`); the full output (≤100 MB) is in the files listed in `data.output_files` and referenced by `artifacts` (`kind=command_output`, `id=<run_id>.<stream>`, `description=<path>`). Windows: ≤256 processes and 4 GiB per process via a Job Object.
+- **Outcomes:** exit 0 → success. Non-zero exit → `PROCESS_FAILURE` (`TEST_FAILURE` for `test.run`) with `exit_code`, output and `data.status=FAIL`. Timeout → `TIMEOUT`; cancellation → `CANCELLED`; both keep the partial output. Missing executable, start failure → `PROCESS_FAILURE`; bad cwd / environment / unsafe batch argument → `INVALID_ARGUMENTS`.
+- **Process tree:** on timeout, cancel and orphaned children the whole tree is killed. `data.process_tree` = `{killed, mechanism: job_object|process_group|taskkill, leftover, orphans?}`; `leftover > 0` means something could not be stopped and is also written into the error message.
+- **Cancellation:** `gateway.cancel(action_id)`, `cancel_all()`, `await shutdown()` and cancelling the awaiting asyncio task all stop running commands. The gateway timeout does the same before returning `TIMEOUT`.
+
+Default granted capabilities: `fs.read`, `fs.write`, `git.read`, `test.run`. Not granted by default: `fs.delete`, `git.write`, `git.discard`, `worktree.manage`, `worktree.discard`, `shell.run`, `shell.network`.
 
 ## 3. `ExecutionResult`
 
@@ -129,8 +139,10 @@ are unaffected.
 
 ## 5. Known limitations
 
-- The gateway timeout cannot stop a worker thread; tools that start processes must enforce their own timeouts.
-  Process-tree termination and cancellation are not implemented yet.
+- The policy decides what may *start*; it cannot constrain what an allowed program then does. Network and filesystem access of
+  allowed commands are not blocked until the sandbox (Phase 7). `HOME`/`USERPROFILE` are passed through.
+- A tool that ignores `ToolContext.cancel` cannot be interrupted; the gateway then reports `TIMEOUT` and warns that its worker may still run.
+- POSIX process-group handling and `prlimit` are implemented but have not been exercised on a POSIX machine.
 - No output-size limits, artifact store, redaction or execution events from the gateway yet.
 - Role 1's `ToolRegistry` names and policy risk labels are not yet aligned with the capability model.
 
