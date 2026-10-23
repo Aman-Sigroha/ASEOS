@@ -248,7 +248,12 @@ async def test_large_output_is_bounded_with_artifact_references(workspace):
     assert len(result.stdout) < 1000
     assert result.data["stdout_bytes"] > 500_000
     assert [a.kind for a in result.artifacts] == ["command_output"]
-    assert result.artifacts[0].id.endswith(".stdout")
+    ref = result.artifacts[0]
+    assert result.data["output_artifacts"] == {"stdout": ref.id}
+    # The artifact holds the complete output, not just the inline excerpt.
+    content, meta, _ = gateway.artifact_store.read(ref.id, limit=1024 * 1024)
+    assert meta.original_size > 500_000 and len(content) == ref.size
+    assert content.startswith(b"yyyy")
 
 
 @pytest.mark.asyncio

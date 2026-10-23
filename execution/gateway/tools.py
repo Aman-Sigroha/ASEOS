@@ -1,3 +1,4 @@
+from execution.gateway.artifact_tools import ArtifactListTool, ArtifactReadTool
 from execution.gateway.capabilities import DEFAULT_CAPABILITIES
 from execution.gateway.command_tools import (
     RunCommandTool,
@@ -57,4 +58,6 @@ def default_tools() -> list[Tool]:
         WorktreeRemoveTool(),
         WorktreeReconcileTool(),
         RunCommandTool(),
+        ArtifactReadTool(),
+        ArtifactListTool(),
     ]

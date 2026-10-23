@@ -12,6 +12,7 @@ from execution.security.levels import ExecutionLevel
 from execution.gateway.tool import (
     Tool,
     ToolContext,
+    ToolError,
     ToolOutput,
     ToolSpec,
 )
@@ -92,17 +93,37 @@ class PatchApplyTool(Tool):
     )
 
     def run(self, context: ToolContext, args: _PatchArgs) -> ToolOutput:
-        plan = plan_patch(
-            context.workspace,
-            args.patch,
-            base=args.base,
-            reverse=args.reverse,
-            allow_delete=CAP_FS_DELETE in context.capabilities,
-            allow_secrets=CAP_FS_READ_SECRETS in context.capabilities,
-        )
-        data = apply_plan(plan, action_id=context.action_id)
+        direction = "reverse " if args.reverse else ""
+
+        try:
+            plan = plan_patch(
+                context.workspace,
+                args.patch,
+                base=args.base,
+                reverse=args.reverse,
+                allow_delete=CAP_FS_DELETE in context.capabilities,
+                allow_secrets=CAP_FS_READ_SECRETS in context.capabilities,
+            )
+            data = apply_plan(plan, action_id=context.action_id)
+        except ToolError as error:
+            # Failure evidence: keep exactly what was submitted and why it failed.
+            ref = context.artifacts.put(
+                args.patch,
+                kind="patch",
+                description=f"rejected {direction}patch ({error.category})",
+                media_type="text/x-diff",
+                retention="audit",
+                redact=False,  # workspace content, not program output
+            )
+
+            if ref is not None:
+                error.artifacts.append(ref)
+                error.data = {**error.data, "patch_artifact": ref.id}
+
+            raise
+
         summary = ", ".join(f"{f['action']} {f['path']}" for f in data["files"])
-        return ToolOutput(
+        output = ToolOutput(
             stdout=(
                 f"Applied patch {data['patch_id'][:12]}: {summary} "
                 f"(+{data['additions']} -{data['deletions']})"
@@ -110,3 +131,17 @@ class PatchApplyTool(Tool):
             data=json.loads(json.dumps(data)),
             truncated=data["applied_diff_truncated"],
         )
+        ref = context.artifacts.put(
+            args.patch,
+            kind="patch",
+            description=f"{direction}patch {data['patch_id'][:12]}: {summary}"[:300],
+            media_type="text/x-diff",
+            retention="audit",
+            redact=False,
+        )
+
+        if ref is not None:
+            output.artifacts.append(ref)
+            output.data["patch_artifact"] = ref.id
+
+        return output

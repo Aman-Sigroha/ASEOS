@@ -14,6 +14,7 @@ from execution.security.paths import (
     write_denied_reason,
 )
 from runtime.schemas.action import ActionType
+from execution.artifacts.sink import NullSink
 from runtime.schemas.execution import ArtifactRef, ErrorCategory
 
 
@@ -33,6 +34,9 @@ class ToolContext:
     # Set by the gateway on cancellation, timeout or shutdown. Tools that
     # run for a while must watch it and stop (and clean up) promptly.
     cancel: threading.Event = field(default_factory=threading.Event)
+    # Where this action stores artifacts (an ArtifactSink, or a NullSink
+    # when artifacts are disabled). Never raises.
+    artifacts: Any = field(default_factory=NullSink)
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,10 @@ class ToolSpec:
     # Unclassified tools default to the highest level so a restricted
     # profile never runs something nobody has assessed.
     level: ExecutionLevel = ExecutionLevel.ELEVATED
+    # Output of programs may carry secrets: mask them before the result
+    # leaves the gateway. Not for file-reading tools, whose content is the
+    # workspace itself (altering it would break edits).
+    redact_output: bool = False
 
 
 @dataclass

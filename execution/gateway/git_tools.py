@@ -135,9 +135,36 @@ class GitDiffTool(Tool):
             )
         )
         data = {k: v for k, v in result.items() if k != "diff"}
-        return ToolOutput(
+        output = ToolOutput(
             stdout=result["diff"], truncated=result["truncated"], data=data
         )
+
+        if result["truncated"] and context.artifacts.enabled:
+            # The inline diff was cut: keep the complete one retrievable.
+            full = _call(
+                lambda: get_diff(
+                    context.workspace,
+                    mode=args.mode,
+                    base=args.base,
+                    paths=args.paths,
+                    include_untracked=args.include_untracked,
+                    max_bytes=context.artifacts.max_artifact_bytes,
+                    context=args.context,
+                    allow_secrets=CAP_FS_READ_SECRETS in context.capabilities,
+                )
+            )
+            ref = context.artifacts.put(
+                full["diff"],
+                kind="diff",
+                description=f"full {args.mode} diff ({full['stats']['files']} files)",
+                media_type="text/x-diff",
+                redact=False,  # workspace content; secret files are already withheld
+            )
+
+            if ref is not None:
+                output.artifacts.append(ref)
+
+        return output
 
 
 class GitInfoArgs(_Args):

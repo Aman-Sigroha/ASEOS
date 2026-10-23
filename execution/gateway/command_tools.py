@@ -61,7 +61,31 @@ def resolve_sandbox(context: ToolContext):
     return sandbox
 
 
-def _artifacts(result: ProcessResult) -> list[ArtifactRef]:
+def _artifacts(result: ProcessResult, sink: Any = None) -> list[ArtifactRef]:
+    """Full command output as artifacts.
+
+    With an artifact store the raw spool files are moved into it (redacted,
+    owned, size-capped) and deleted; without one, the legacy references to the
+    spool files are returned.
+    """
+
+    if sink is not None and getattr(sink, "enabled", False):
+        program = Path(result.argv[0]).name if result.argv else "command"
+        refs = []
+
+        for stream, path in result.output_files.items():
+            ref = sink.put_file(
+                path,
+                kind="command_output",
+                description=f"{stream} of {program} (run {result.run_id})",
+                remove_source=True,
+            )
+
+            if ref is not None:
+                refs.append(ref)
+
+        return refs
+
     return [
         ArtifactRef(
             id=f"{result.run_id}.{stream}",
@@ -72,10 +96,15 @@ def _artifacts(result: ProcessResult) -> list[ArtifactRef]:
     ]
 
 
+def _stream_of(ref: ArtifactRef) -> str:
+    return ref.description.split(" ", 1)[0]
+
+
 def _data(
     result: ProcessResult,
     workspace: Path,
     decision: PolicyDecision | None = None,
+    artifacts: list[ArtifactRef] | None = None,
 ) -> dict[str, Any]:
     try:
         cwd = Path(result.cwd).relative_to(workspace).as_posix() or "."
@@ -98,6 +127,11 @@ def _data(
         "sandboxed": "sandbox" in result.tree,
     }
 
+    if artifacts is not None:
+        # Raw spool files no longer exist; point at the stored copies instead.
+        data["output_files"] = {}
+        data["output_artifacts"] = {_stream_of(ref): ref.id for ref in artifacts}
+
     if decision is not None:
         data["policy"] = {
             "rule": decision.rule,
@@ -114,11 +148,13 @@ def to_output(
     *,
     failure_category: str,
     decision: PolicyDecision | None = None,
+    sink: Any = None,
 ) -> ToolOutput:
     """Turn a process result into a ToolOutput, or raise a categorized ToolError."""
 
-    data = _data(result, workspace, decision)
-    artifacts = _artifacts(result)
+    artifacts = _artifacts(result, sink)
+    stored = bool(sink is not None and getattr(sink, "enabled", False))
+    data = _data(result, workspace, decision, artifacts if stored else None)
 
     if result.status == "PASS":
         return ToolOutput(
@@ -220,6 +256,7 @@ class RunCommandTool(Tool):
         capabilities=frozenset({CAP_SHELL_RUN}),
         read_only=False,
         timeout_seconds=660,
+        redact_output=True,
     )
 
     def __init__(
@@ -281,12 +318,14 @@ class RunCommandTool(Tool):
             workspace=context.workspace,
             sandbox=sandbox,
             network=bool(decision.required_capabilities & {CAP_SHELL_NETWORK}),
+            log_dir=context.artifacts.spool_dir,
         )
         return to_output(
             result,
             context.workspace,
             failure_category="PROCESS_FAILURE",
             decision=decision,
+            sink=context.artifacts,
         )
 
 
@@ -339,6 +378,7 @@ class RunTestTool(Tool):
         capabilities=frozenset({CAP_TEST_RUN}),
         read_only=False,
         timeout_seconds=660,
+        redact_output=True,
     )
 
     def __init__(self, policy: CommandPolicy | None = None) -> None:
@@ -358,6 +398,7 @@ class RunTestTool(Tool):
                 sandbox=sandbox,
                 policy=self.policy,
                 capabilities=context.capabilities,
+                log_dir=context.artifacts.spool_dir,
             )
         except TargetError as exc:
             raise ToolError("INVALID_ARGUMENTS", str(exc)) from exc
@@ -365,7 +406,28 @@ class RunTestTool(Tool):
         data = report.model_dump()
         data["process_tree"] = process.tree if process else {}
         data["sandboxed"] = bool(process and "sandbox" in process.tree)
-        artifacts = _artifacts(process) if process else []
+        sink = context.artifacts
+        artifacts = _artifacts(process, sink) if process else []
+
+        if sink.enabled:
+            if process:
+                data["process"] = {
+                    **data.get("process", {}),
+                    "output_files": {},
+                    "output_artifacts": {_stream_of(ref): ref.id for ref in artifacts},
+                }
+
+            report_ref = sink.put(
+                report.model_dump_json(),
+                kind="test_report",
+                description=f"{report.framework} {report.scope} run {report.run_id}: {report.status}",
+                media_type="application/json",
+                retention="audit",
+            )
+
+            if report_ref is not None:
+                artifacts.append(report_ref)
+
         stdout = process.stdout if process else ""
         stderr = process.stderr if process else ""
 

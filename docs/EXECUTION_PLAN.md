@@ -4,9 +4,9 @@ Execution, Git, worktrees, command running, sandboxing and testing.
 
 - **Status snapshot date:** 2026-10-23
 - **Branch audited:** `execution` (HEAD `a91605f`)
-- **Test baseline:** `python -m pytest -q` → 1005 passed, 6 skipped (symlink/POSIX-mode tests and the real-container test skip where unavailable), 0 failed (default `testpaths` now exclude the
+- **Test baseline:** `python -m pytest -q` → 1082 passed, 6 skipped (symlink/POSIX-mode tests and the real-container test skip where unavailable), 0 failed (default `testpaths` now exclude the
   intentionally failing `fixtures/` repo). Before the first slices it was 202 passed + 1 fixture failure.
-- **Progress log:** slices A1–A3, B1–B2, C1–C4 (Phase 2 filesystem) C5–C9 (Phase 3 patches) D1–D3, D9 (Phase 4 Git) D4–D8, D11 (Phase 5 worktrees) E1–E5 (Phase 6 commands) H1–H6 (Phase 7 security) F1–F6 (Phase 8 tests) and F7–F8 (Phase 9 verification) are done; B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
+- **Progress log:** slices A1–A3, B1–B2, C1–C4 (Phase 2 filesystem) C5–C9 (Phase 3 patches) D1–D3, D9 (Phase 4 Git) D4–D8, D11 (Phase 5 worktrees) E1–E5 (Phase 6 commands) H1–H6 (Phase 7 security) F1–F6 (Phase 8 tests) and F7–F8 (Phase 9 verification) and G1–G3 (Phase 10 artifacts, redaction, records) are done; B3/B4 are partly done (see [Slice backlog](#3-slice-backlog-suggested-order)).
 
 Companion documents: [ARCHITECTURE.md](ARCHITECTURE.md) (how the system fits together),
 [API_CONTRACTS.md](API_CONTRACTS.md) (baseline runtime ↔ execution contract),
@@ -66,12 +66,12 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 | 7 | Sandboxing & execution security | 🟡 PARTIAL | Threat model, path/secret hardening, levels & profiles, container backend with fail-closed enforcement done; **real-container proof pending** |
 | 8 | Test discovery & execution | 🟡 PARTIAL | Discovery, 7 adapters, JUnit/JSON/console parsing, normalized statuses, targeted runs, version fingerprint + freshness done; only Python adapters run against real tools |
 | 9 | Deterministic verification evidence | 🟡 PARTIAL | 8 check kinds with traceable evidence, stale/unstable detection, next-step hints and a Role 1 `Verifier` adapter done; Role 1 sign-off, artifact refs (Phase 10) and a `verify.run` action pending |
-| 10 | Artifacts, retention & audit | ⬜ PENDING | Only runtime events exist |
+| 10 | Artifacts, retention & audit | 🟡 PARTIAL | Artifact store, retention/quota, redaction, execution records, evidence consistency checks, `artifact.read`/`list` and store-failure handling done; Role 1 event forwarding, gc scheduler and report/trace artifacts pending |
 | 11 | Concurrency, interruption & recovery | ⬜ PENDING | — |
 | 12 | Cross-role integration | 🟡 PARTIAL | Role 1 wired in; Role 2 and Role 3 pending |
 | 13 | Security, testing & performance qualification | 🟡 PARTIAL | Unit/integration tests only |
 
-**Role 4 completion checklist: 11 ✅ done · 12 🟡 partial · 3 ⬜ pending (of 26)** (an item flips only when its full acceptance criterion is met). See [Section 4](#4-role-4-completion-checklist).
+**Role 4 completion checklist: 12 ✅ done · 13 🟡 partial · 1 ⬜ pending (of 26)** (an item flips only when its full acceptance criterion is met). See [Section 4](#4-role-4-completion-checklist).
 
 ---
 
@@ -141,9 +141,9 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 - ✅ New-file, delete-file and multi-file patches. Deletion needs the `fs.delete` capability, which is **not** granted by default.
 - ✅ Optional per-file `base` sha256 map; mismatch → `PATCH_CONFLICT` with expected/actual hashes. Files are re-compared immediately before writing (and just before each replace), so a file that changed after validation is not overwritten.
 - ✅ Protected paths (`.git/**`, `.env`, `.env.*` except `.example/.sample/.template`; symlinks refused) enforced by a shared `ensure_writable_path` also used by `repo.write` and `patch.replace`. Limits: 200 KB patch, 20 files, 10 MB per file.
-- 🟡 All files are validated in memory first; writes are atomic per file; if a later step fails earlier files are restored (best-effort). `data.rolled_back` / `data.partial` / `data.unrestored_files` say exactly what happened, and the result's `applied_diff` can be fed back with `reverse=true` to undo a patch. Not done: persisted recovery artifacts (Phase 10) and true multi-file atomicity.
+- 🟡 All files are validated in memory first; writes are atomic per file; if a later step fails earlier files are restored (best-effort). `data.rolled_back` / `data.partial` / `data.unrestored_files` say exactly what happened, and the result's `applied_diff` can be fed back with `reverse=true` to undo a patch. Every applied or rejected patch is now kept as an audit artifact (Phase 10); not done: automatic recovery from those artifacts and true multi-file atomicity.
 - ✅ Result is built from disk after writing: per-file action, sha256 before/after, additions/deletions, hunk offsets and an `applied_diff` regenerated from the real before/after bytes (≤1 MB, `applied_diff_truncated`). Post-write verification re-reads every file.
-- 🟡 Result carries `patch_id` (sha256 of the patch text) and the originating `action_id`. Linking to a task id and persisting the record needs the event/artifact work (Phase 10) and a task id in the gateway context.
+- 🟡 Result carries `patch_id` (sha256 of the patch text) and the originating `action_id`. The patch text is persisted as an audit artifact and the execution record links `patch_id`, `action_id` and (when the gateway is given one) `task_id`.
 - ✅ Conflicts report the path, hunk number, expected vs found lines, ambiguous candidate line numbers, or expected/actual hashes in `data`.
 - ✅ Patch engine: explicit UTF-8, CRLF/LF preserved (added lines use the file's dominant line ending), missing-final-newline handled, file permission bits preserved on POSIX. 🟡 The legacy `apply_patch` text replace (`patch.replace`, used by `execute_task`) still uses platform default encoding.
 
@@ -160,7 +160,7 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 - ✅ Mutating tools, each needing a capability that is **not granted by default**: `git.stage`, `git.commit`, `git.branch_create` (`git.write`) and `git.discard` (`git.discard`). See EXECUTION_CONTRACT §2.3 for the exact rules.
 - ✅ Preserving user work: named files only (no `.`/dirs/globs, `.env` and `.git` refused); `commit` refuses unless the index holds *exactly* the named paths; refuses detached HEAD and merge/rebase/conflict states; `branch_create` never checks out or moves a branch; `discard` only touches tracked, unstaged files and returns the discarded diff (re-applicable via `patch.apply`); every mutation reports `other_changes` (dirty paths outside its scope, observed before it ran) and the status counts after.
 - ✅ Tests with dirty trees and pre-existing user changes: `test_git_read_tools.py`, `test_git_mutations.py` (81 tests, real repos incl. linked worktree, merge conflict, upstream, lock file, fsmonitor).
-- 🟡 Not covered: pushing/fetching, checkout/switch, reset, stash, rebase (deliberately out of scope); staging cannot tell the agent's edits from the user's earlier edits *inside the same file* (use an isolated worktree, or pass `expected_sha256`); hooks and signing configured in the repo still run on `git.commit`; diff text is bounded after Git produces it, not while streaming; the 'artifact' for oversized diffs waits for Phase 10.
+- 🟡 Not covered: pushing/fetching, checkout/switch, reset, stash, rebase (deliberately out of scope); staging cannot tell the agent's edits from the user's earlier edits *inside the same file* (use an isolated worktree, or pass `expected_sha256`); hooks and signing configured in the repo still run on `git.commit`; diff text is bounded after Git produces it, not while streaming; the complete diff of an oversized result is kept as an artifact (Phase 10).
 
 ### Phase 5 — Git worktrees and task isolation 🟡 PARTIAL
 
@@ -197,7 +197,7 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 - ✅ `shell.run` is now implemented: `{command: argv list | plain string, cwd, timeout_seconds ≤ 600, env}`. Strings are split like POSIX quoting but never run by a shell; pipes, redirects and `&&` are rejected. Needs `shell.run` (not granted by default). Results carry `data.policy`, `data.process_tree`, output byte counts and artifact refs.
 - ✅ `test.run` now goes through the same runner, so it also gets the scrubbed environment, tree kill, output bounds and cancellation.
 - ✅ Tests: `test_process_runner.py` (38), `test_command_policy.py` (84), `test_shell_tool.py` (28) — real processes, real grandchildren, verified dead afterwards.
-- 🟡 Not covered / honest limits: **the policy decides what may start, not what an allowed program does** — a test suite is arbitrary code and can still read files, use the network or spawn processes within the limits (that is Phase 7). `shell.network` gates *install-type commands* only; network access is not blocked. `HOME`/`USERPROFILE` are passed through, so tools can read user-level config (`.npmrc`, `.pypirc`). The POSIX code paths (process group, `prlimit`) are written and unit-tested for logic but were **not run on a POSIX machine** in this environment. POSIX has no memory or process-count limit yet (cgroups/containers are Phase 7). Command logs are plain files in the system temp directory with no retention until Phase 10. Streaming logs are not implemented (results are returned when the command ends). `runtime/verification/command.py` (Role 1) still uses `create_subprocess_shell` and has not been moved onto this runner.
+- 🟡 Not covered / honest limits: **the policy decides what may start, not what an allowed program does** — a test suite is arbitrary code and can still read files, use the network or spawn processes within the limits (that is Phase 7). `shell.network` gates *install-type commands* only; network access is not blocked. `HOME`/`USERPROFILE` are passed through, so tools can read user-level config (`.npmrc`, `.pypirc`). The POSIX code paths (process group, `prlimit`) are written and unit-tested for logic but were **not run on a POSIX machine** in this environment. POSIX has no memory or process-count limit yet (cgroups/containers are Phase 7). Command output beyond the inline buffers is now moved into the artifact store (redacted, owned, retained, capped) and the raw spool file is deleted (Phase 10). Streaming logs are not implemented (results are returned when the command ends). `runtime/verification/command.py` (Role 1) still uses `create_subprocess_shell` and has not been moved onto this runner.
 
 ### Phase 7 — Sandboxing and execution security 🟡 PARTIAL
 
@@ -229,7 +229,7 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 - ✅ Configurable timeout (`timeout_seconds`, ≤600).
 - ✅ Tests: `test_test_parsers.py` (106) and `test_test_service.py` (45) — real pytest and unittest runs for pass, fail, skip, collection error, syntax error, no tests, all skipped, targeted/keyword, timeout, cancellation, corrupted and missing reports (via a conftest that sabotages the file), workspace-modifying tests, stale/fresh results, plus fixtures for every other parser.
 - 🟡 **Only the Python adapters were exercised against real tools** (this machine has no Node, Maven, Gradle, Cargo or Go). Their commands, target validation, policy compatibility and parsers are tested against sample output only; expect to adjust them on first contact with real projects. Maven/Gradle need dependencies, which the network-less sandbox cannot download.
-- 🟡 Not covered: using the *project's* interpreter/venv (the controlled `PATH`'s `python` runs the tests, so a project that needs its own virtualenv must provide it on `PATH`), Jest/Vitest JUnit output (console summary only), the Gradle wrapper, parallel/sharded runs, flaky-test retries, coverage, raw report files as retained artifacts (Phase 10).
+- 🟡 Not covered: using the *project's* interpreter/venv (the controlled `PATH`'s `python` runs the tests, so a project that needs its own virtualenv must provide it on `PATH`), Jest/Vitest JUnit output (console summary only), the Gradle wrapper, parallel/sharded runs, flaky-test retries, coverage, raw JUnit/report files as retained artifacts (only the normalized report and console output are kept).
 
 ### Phase 9 — Deterministic verification and recovery evidence 🟡 PARTIAL
 
@@ -238,24 +238,25 @@ Suggested slice sequences for the biggest pending items are listed in [Slice bac
 - ✅ Role 1 verification abstraction: `Verifier`, `CommandVerifier`, `VerificationResult`/`VerificationCheck` (`PASS/FAIL/ERROR/TIMEOUT`), runtime integration, replanning with verification evidence, event replay (`runtime/verification/`, `runtime/planner/replanner.py`).
 - ✅ `execute_task` produces real patch + test + diff evidence and emits `VERIFICATION_*` events.
 - ✅ Supported check kinds (`execution/verification/checks.py`, validated declarative models): `tests`, `build`, `lint`, `typecheck`, `file_exists`, `file_content` (contains / not_contains / sha256), `diff_contains` (added/removed lines, min files changed), `no_prohibited_paths` (prohibited globs and/or an allow-list; staged, unstaged, untracked, conflicted, renamed and — with `base` — committed changes). Every check is established by gateway tool calls, so capabilities, the command policy, path/secret rules and the sandbox all apply. Build/lint/typecheck commands must be of the matching policy category (a "lint" check that actually runs the test suite is an ERROR); a tool that is not installed is an ERROR, not a code failure.
-- 🟡 Evidence includes the underlying result: every check records its gateway calls (`tool`, unique `action_id`, success, exit code, error category, truncation, artifact refs, output excerpts), the observed facts (counts, failing cases, matched/missing text, violating paths) and a message with the first failing cases. Real artifact references wait for the Phase 10 store.
+- ✅ Evidence includes the underlying result: every check records its gateway calls (`tool`, unique `action_id`, success, exit code, error category, truncation, artifact refs, output excerpts), the observed facts (counts, failing cases, matched/missing text, violating paths) and a message with the first failing cases. Traces now carry real artifact references (id, size, sha256) retrievable with `artifact.read`, and a PASS is withheld when the evidence is inconsistent (Phase 10).
 - ✅ Freshness: test results carry `workspace_version`; a verification run fingerprints the workspace before, after each program-running check and at the end. A PASS is downgraded to ERROR if the tree changed while it ran (`require_stable`, default on), and `report_is_current()` reports staleness later.
 - 🟡 One authoritative status: **Role 1's `VerificationStatus` (`PASS/FAIL/ERROR/TIMEOUT`) is the only verdict.** `ExecutionVerifier` implements Role 1's `Verifier` and folds the evidence deterministically (TIMEOUT > ERROR > FAIL > PASS; no checks, a bound-to-another-workspace verifier or a crashed check is never a PASS). `ExecutionResult.success` and `TestRunResult` are inputs, not verdicts. Two optional fields (`kind`, `evidence`) were added to Role 1's `VerificationCheck`/`VerificationResult`; old producers are unaffected. **Role 1 sign-off, and replacing `CommandVerifier` in the real composition, are still open.**
 - ✅ Failure evidence suggests the next move: each non-passing check lists `next_steps` from `inspect`, `retrieve_output`, `retest_targeted`, `modify_patch`, `replan`, `stop` (`replan`/`stop` only when the check was blocked, e.g. permission or policy, because retrying cannot help).
 - ✅ Tests: `test_verification.py` (80: globs, parsing/validation, every check kind against real repos, stale and unstable workspaces, timeouts, capability/policy blocks) and `test_execution_verifier.py` (10: the Role 1 adapter and the runtime completing or failing on the evidence).
 - ⬜ Left for later: a `verify.run` gateway action so a planner can request verification, check specs in Role 1's task/plan schema, verification events from the execution side, regex content conditions (deliberately omitted: unbounded patterns), and seeing changes to git-ignored files (e.g. a modified `.env`) in `no_prohibited_paths`.
 
-### Phase 10 — Execution artifacts, output retention and auditability ⬜ PENDING
+### Phase 10 — Execution artifacts, output retention and auditability 🟡 PARTIAL
 
 *Completion criterion: every meaningful execution is traceable to inputs, workspace, outputs and evidence, without exposing unnecessary or sensitive data.*
 
 - ✅ (Baseline) Runtime `EventEmitter`/`EventStore` and replay exist (Role 1); `execute_task` emits `ACTION_*`/`VERIFICATION_*` events.
-- ⬜ Artifact store: full logs, test reports, diffs, patches, build reports, traces; stable references; bounded excerpt in the result.
-- ⬜ Task/action/workspace ownership and retention policy (temporary vs audit).
-- ⬜ Secret redaction before display/persistence.
-- ⬜ Evidence consistency checks (exit code, diff, summary, artifact ref match the real operation).
-- ⬜ Evidence-to-action association via the runtime event system (no second task history).
-- ⬜ Artifact-store failure handling and tests.
+- ✅ Artifact store (`execution/artifacts/`): an integrity hash (sha256) per artifact, stable opaque ids (`art_<24 hex>`), kept **outside the working tree** (`<git common dir>/aseos/artifacts`, or a per-workspace temp folder for a plain directory) so artifacts never appear in diffs, fingerprints or file tools. Stored: the complete output of any command whose output outgrew the inline buffers, a `test_report` (JSON of the normalized `RunReport`) for every test run, the complete diff when `git.diff` was cut, every applied **and every rejected** patch, and an `execution_record` per action. Results keep a bounded excerpt plus `ArtifactRef`s (`id`, `kind`, `size`, `sha256`, `retention`, `truncated`, `redactions`). The model retrieves content with `artifact.read` (paged by `offset`/`limit`, or `from_end`) and `artifact.list`.
+- 🟡 Ownership and retention: every artifact records workspace, action, tool and (when the gateway is given a `task_id`) task. Retention classes: `temporary` (7 days) and `audit` (90 days); per-artifact cap 20 MB (head and tail kept) and a 500 MB store quota that evicts the oldest *temporary* artifacts first and refuses new writes rather than delete audit records. Expired artifacts are unreadable at once; physical cleanup (`store.gc()`) runs when the quota is hit but **there is no background scheduler yet**. Reads are scoped to the owning workspace: another task's artifact is indistinguishable from a missing one.
+- ✅ Secret redaction before display and persistence (`redact.py`): environment secret values plus private keys, AWS/GitHub/Slack/Google/`sk-` tokens, JWTs, bearer/basic headers, URL credentials and `password=`/`token:`-style assignments, applied to the output of `shell.run`/`test.run` (inline and stored). Patterns are bounded and tested against hostile input. Raw spool files (previously unredacted files in the temp folder) are moved into the store and deleted. File-reading tools and patches are deliberately *not* rewritten (that would corrupt edits); secret files stay blocked by path rules. Redaction is best-effort: a secret with no recognizable shape and no environment entry is not found.
+- ✅ Evidence consistency checks (`execution/artifacts/consistency.py`, `gateway.check_evidence`): exit code vs success vs process status, test counts vs status, patch id vs file list, and for every artifact reference: it exists, belongs to this workspace and action, its stored bytes still match the recorded hash and size, and its size agrees with the byte count the process reported. Verification (Phase 9) turns a would-be PASS into ERROR when any of these disagree.
+- 🟡 Evidence-to-action association: the `execution_record` (args digest and bounded redacted summary, level, capabilities, outcome, artifact ids, redaction count) is keyed by the runtime's `action_id`, so the runtime's event stream stays the one task history. `gateway.add_observer()` hands each record to the host. **Role 1 does not yet forward records into its `EventEmitter`.** Reads are not recorded unless `record_reads=True`.
+- ✅ Artifact-store failure handling: a missing, unwritable, full or corrupt store never fails or changes an action. The excerpt stays in the result, `data.artifact_errors` says what could not be stored (including a failed audit record), raw spool files are still deleted, and the gateway runs with artifacts disabled when the store cannot be opened (`store_error`).
+- ⬜ Left for later: raw JUnit/other report files and build reports as artifacts, execution traces/timelines, a gc scheduler, per-task retention overrides, encryption at rest, cross-process locking of the quota, and tying artifact access to a user/session rather than a workspace.
 
 ### Phase 11 — Concurrency, interruption and crash recovery ⬜ PENDING
 
@@ -378,7 +379,8 @@ sandbox → tests → verification → recovery/artifacts → integration/securi
 - ⬜ F9. Replace `CommandVerifier` with `ExecutionVerifier` in the real composition (needs Role 1) — same as E9. ⬜ F10. `verify.run` gateway action + check specs in Role 1's task/plan schema. ⬜ F11. Include git-ignored files in the prohibited-path check.
 
 **Slice group G — Artifacts, recovery, integration**
-- G1. Artifact store + bounded results. G2. Redaction. G3. Execution records + running-ops table. G4. Reconcile on restart. G5. Failure-injection suite.
+- ✅ G1. Artifact store + bounded results (+ `artifact.read`/`artifact.list`). ✅ G2. Redaction. 🟡 G3. Execution records (done; running-ops table waits for Phase 11). G4. Reconcile on restart. G5. Failure-injection suite.
+- ⬜ G1b. Forward execution records into Role 1's `EventEmitter` (needs Role 1). ⬜ G1c. Schedule `store.gc()`; retain raw JUnit/build reports and traces; register `READ_ARTIFACT`/`LIST_ARTIFACTS` in Role 1's `ToolRegistry`.
 - G6. Role 1 end-to-end through the gateway. G7. Role 2 API surface. G8. Role 3 change notifications + index-refresh test. G9. Security + performance suites.
 
 ---
@@ -417,8 +419,8 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 - [~] Provide actual verification evidence to Role 1 — 8 check kinds, versioned traceable evidence and an `ExecutionVerifier` that works in the runtime are done; Role 1 has not adopted it yet and artifact references wait for Phase 10
 
 **F. Artifacts and recovery**
-- [ ] Add bounded output and artifact references
-- [ ] Implement redaction and execution audit records
+- [x] Add bounded output and artifact references — bounded excerpts + retrievable artifacts with hashes, ownership and retention
+- [~] Implement redaction and execution audit records — pattern + environment redaction and per-action audit records done; records are not yet forwarded into Role 1's event stream, redaction is best-effort
 - [ ] Handle interruption, concurrency and crash recovery
 
 **G. Integration and quality**
@@ -427,7 +429,7 @@ Mark ✅ only after implementation **and** acceptance tests pass.
 - [ ] Coordinate index refreshes and worktrees with Role 3
 - [~] Complete security, failure-injection and performance tests — unit/integration only
 
-`[x]` done · `[~]` partial · `[ ]` pending — **11 / 12 / 3** of 26.
+`[x]` done · `[~]` partial · `[ ]` pending — **12 / 13 / 1** of 26.
 
 ---
 
@@ -464,7 +466,7 @@ rather than preserving it for review.
 | Worktree ownership & lifecycle | 1 & 4 | ⬜ → `WORKTREE_LIFECYCLE.md` |
 | Diff / patch / finalization semantics | 2 & 4 | ⬜ |
 | Test results & verification status | 1 & 4 (2 presents) | 🟡 proposal built: Role 1's `VerificationStatus` is the single verdict, Role 4 supplies evidence + `next_steps` via optional fields; **Role 1 sign-off pending** |
-| Artifact references & error formats | 1, 2, 4 (3 sources) | ⬜ |
+| Artifact references & error formats | 1, 2, 4 (3 sources) | 🟡 `ArtifactRef` extended (size, sha256, retention, truncated, redactions); ids are opaque `art_…`; Role 2/3 consumption and Role 1 registry pending |
 | Failure recovery & cancellation | 1 & 4 (2 controls) | ⬜ |
 
 ### Integration rules (unchanged)

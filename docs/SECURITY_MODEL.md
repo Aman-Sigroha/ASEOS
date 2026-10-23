@@ -102,7 +102,7 @@ through the `git.*` tools.
 - A `fs.write` grant allows editing any non-protected file, including CI definitions and scripts that will later be
   executed. Mitigation is review of the worktree diff before merge, not prevention.
 - Git hooks and signing settings of the repository still run on `git.commit`.
-- Command logs are plain files in the system temp directory with no retention policy until Phase 10.
+- Artifacts (command logs, reports, patches, records) are plain files under the repository's `.git/aseos/artifacts` (or a temp folder for non-Git directories), readable by anything running as the same OS user and not encrypted. Redaction before storage is best-effort pattern matching; a secret without a recognizable shape and without an environment entry is stored as-is. Retention is enforced on read and by `store.gc()`, which the host must schedule.
 - Time-of-check/time-of-use gaps remain between a path check and the file operation (tiny, but not zero) because no
   file-system locking is used.
 - Disk usage inside a workspace is not limited.
@@ -159,6 +159,8 @@ gateway = ExecutionGateway(
 | Windows path aliases, device names, ADS | `test_path_security.py` |
 | Secret reads and diff redaction | `test_path_security.py` |
 | Env scrubbing, redaction | `test_process_runner.py`, `test_sandbox.py` |
+| Output/artifact redaction, hostile-input timing | `test_artifacts.py`, `test_artifact_integration.py` |
+| Artifact ownership, id validation, integrity, quota | `test_artifacts.py`, `test_artifact_integration.py` |
 | Process limits, tree kill, timeout/cancel | `test_process_runner.py`, `test_shell_tool.py` |
 | Command policy | `test_command_policy.py`, `test_shell_tool.py` |
 | Sandbox command line, fail-closed | `test_sandbox.py` |

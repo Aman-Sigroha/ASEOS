@@ -27,6 +27,12 @@ class ArtifactRef(BaseModel):
     id: str = Field(min_length=1)
     kind: str = Field(min_length=1)
     description: str = ""
+    # Set for artifacts held by the execution artifact store.
+    size: int | None = Field(default=None, ge=0)
+    sha256: str | None = None
+    retention: str | None = None
+    truncated: bool = False
+    redactions: int = 0
 
 
 class ExecutionResult(BaseModel):

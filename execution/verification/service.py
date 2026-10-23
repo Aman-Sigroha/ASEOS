@@ -91,6 +91,21 @@ def _trace(result: ExecutionResult, *, output: bool) -> ToolTrace:
     )
 
 
+def _output_was_cut(result: ExecutionResult) -> bool:
+    """Is there more output than the result shows (retrievable via artifact.read)?"""
+
+    data = result.data
+    return bool(
+        result.artifacts
+        and (
+            result.truncated
+            or data.get("cases_truncated")
+            or data.get("stdout_truncated")
+            or data.get("stderr_truncated")
+        )
+    )
+
+
 def _steps(
     status: VerificationStatus,
     *,
@@ -141,7 +156,14 @@ class _Run:
             payload=payload,
         )
         result = await self.gateway.execute(action)
-        return result, _trace(result, output=output)
+        trace = _trace(result, output=output)
+
+        try:
+            trace.evidence_problems = self.gateway.check_evidence(result)
+        except Exception as exc:  # a broken consistency check is itself a problem
+            trace.evidence_problems = [f"evidence check failed: {type(exc).__name__}: {exc}"]
+
+        return result, trace
 
 
 def _evidence(
@@ -245,7 +267,7 @@ async def _check_tests(run: _Run, check: TestsCheck, started: float) -> CheckEvi
             not_run_kind in _BLOCKED_NOT_RUN or result.error_category in _BLOCKED_CATEGORIES
         )
 
-    more = bool(result.artifacts or result.truncated or data.get("cases_truncated"))
+    more = _output_was_cut(result)
     headline = str(data.get("summary") or result.stderr or "tests did not pass")
     details = "".join(
         f"\n- {case['name']}: {excerpt(case['message'], 200)}".rstrip(": ")
@@ -288,7 +310,7 @@ async def _check_command(run: _Run, check: CommandCheck, started: float) -> Chec
     policy = data.get("policy") or {}
     category = policy.get("category")
     process_status = data.get("status")
-    more = bool(result.artifacts or result.truncated)
+    more = _output_was_cut(result)
     observed = {
         "command": data.get("command"),
         "policy_category": category,
@@ -779,6 +801,13 @@ async def run_checks(
             continue
 
         item = await _dispatch(run, check)
+        problems = [p for t in item.traces for p in t.evidence_problems]
+
+        if problems and item.status == "PASS":
+            # Evidence that contradicts itself cannot establish a pass.
+            item.status = "ERROR"
+            item.message = "Inconsistent evidence: " + "; ".join(problems[:3])
+            item.next_steps = _steps("ERROR")
 
         if check.kind in _PROCESS_KINDS:
             after = await _fingerprint(gateway.workspace)

@@ -52,6 +52,8 @@ class ToolTrace(BaseModel):
     artifacts: list[ArtifactRef] = Field(default_factory=list)
     stdout_excerpt: str = ""
     stderr_excerpt: str = ""
+    evidence_problems: list[str] = Field(default_factory=list)
+    """Inconsistencies between this call's result and its own artifacts."""
 
 
 class CheckEvidence(BaseModel):

@@ -84,6 +84,8 @@ ASEOS/
 │   │                         policy.py (default-deny command policy), runner.py (trusted-caller wrapper)
 │   ├── testing/              service.py (detect → run → normalize), adapters.py (pytest, unittest, npm, Maven,
 │   │                         Gradle, Cargo, Go), junit.py, console.py, model.py (RunReport); runner.py = legacy helper
+│   ├── artifacts/            store.py (content store, retention, quota, gc), redact.py, sink.py (per-action handle),
+│   │                         records.py (audit records), consistency.py (evidence checks)
 │   ├── versioning.py         workspace_version(): content fingerprint used to date test results
 │   ├── verification/         checks.py (8 check kinds), service.py (run_checks → evidence), evidence.py,
 │   │                         globs.py, verifier.py (ExecutionVerifier = Role 1 Verifier adapter)
@@ -151,6 +153,7 @@ Two implementations exist:
 | `APPLY_PATCH` (`patch.apply`) | Applies a unified diff (create/modify/delete, multi-file); validates all files first, atomic per file, rolls back on failure, reports the diff actually produced; `reverse=true` undoes one | As above; deleting needs the `fs.delete` capability (not granted by default) |
 | `RUN_TEST` (`test.run`) | Detects the framework, runs the suite or validated targets, returns a normalized `RunReport` with the tested version | Commands built by us (not the model) and checked by the policy; scrubbed env, tree kill, bounded output, sandbox when configured |
 | `TEST_FRESHNESS` (`test.freshness`) | Is an earlier result's workspace fingerprint still current? | Read-only |
+| `READ_ARTIFACT` / `LIST_ARTIFACTS` (`artifact.read`, `artifact.list`) | Page through stored output, reports, patches, full diffs and records of this workspace | Read-only; scoped to the workspace; bounded |
 | `GIT_DIFF` (`git.diff`) | `git diff --` via the command runner, 10 s | Fixed argv |
 | `RUN_COMMAND` (`shell.run`) | One allowed program (argv, never a shell) under the command policy | Needs `shell.run` (not granted by default); default-deny policy, path arguments confined to the workspace, scrubbed env, bounded output, tree kill on timeout/cancel |
 
@@ -204,7 +207,7 @@ What is **not** provided (do not assume it):
 - A *proven* sandbox. Worktrees isolate source, not processes. A container backend exists and is enforced fail-closed by the `dev`/`elevated` profiles, but it has only been tested against a stand-in engine, not a real daemon (see [SECURITY_MODEL.md](SECURITY_MODEL.md) §6).
 - Anything beyond *starting* only allowed programs: what a test suite or build script then does (network, files outside the workspace, user-level config via `HOME`) is not restricted; POSIX process handling is untested here; no memory/process limits off Windows.
 - Patch recovery, crash recovery, file locking, and notification of other subsystems after writes (`repo.write` does detect stale-version conflicts).
-- Redaction, artifact retention or an execution audit trail beyond runtime events.
+- Encrypted or access-controlled artifacts, scheduled retention cleanup, or forwarding of execution records into the runtime's event stream (the records and the `add_observer` hook exist; the wiring is Role 1's).
 - `CommandVerifier` (Role 1) runs shell command strings directly and does not go through the execution boundary.
 
 These gaps and their planned fixes are tracked in [EXECUTION_PLAN.md](EXECUTION_PLAN.md#2-known-issues-found-during-the-audit).
@@ -273,7 +276,7 @@ artifacts, command policy and sandboxing — will be added in slices so the runt
   `tests/agent/test_real_executor_integration.py`.
 - Role 1 suites: `tests/agent`, `decision`, `events`, `llm`, `planner`, `schemas`, `state`, `task`, `tools`,
   `verification`.
-- Baseline at time of writing: **1005 passed, 6 skipped** (symlink-file and POSIX-mode tests skip when the OS does not allow
+- Baseline at time of writing: **1082 passed, 6 skipped** (symlink-file and POSIX-mode tests skip when the OS does not allow
   them; a Windows directory-junction test covers the same escape). `pyproject.toml` `testpaths` limits default collection to `tests/`
   and `execution/tests/`; the deliberately broken `fixtures/repositories/calculator` test (which the demo fixes)
   is not collected.

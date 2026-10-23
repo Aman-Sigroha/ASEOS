@@ -42,6 +42,8 @@ The workspace is trusted gateway context (`ToolContext`); it is never taken from
 | `git.worktree.list` | `WORKTREE_LIST` | `git.read` | yes | `{include_removed?, assess=true}`; records plus live assessment |
 | `git.worktree.remove` | `WORKTREE_REMOVE` | `worktree.manage` | no | `{worktree_id, discard_unreviewed?}`; see §2.4 |
 | `git.worktree.reconcile` | `WORKTREE_RECONCILE` | `worktree.manage` | no | `{}`; report only, deletes nothing |
+| `artifact.read` | `READ_ARTIFACT` | `fs.read` | yes | `{id, offset=0, limit≤262144, from_end=false}`; bounded slice of a stored artifact plus its metadata, `eof` and `next_offset`; see §2.9 |
+| `artifact.list` | `LIST_ARTIFACTS` | `fs.read` | yes | `{kind?, action_id?, limit≤100}`; this workspace's artifacts, newest first |
 | `shell.run` | `RUN_COMMAND` | `shell.run` (+ `shell.network` for installs) | no | `{command: argv list \| string, cwd='.', timeout_seconds?, env?}`; policy-checked; see §2.5 |
 
 Tool ids use the planned namespaces (`repo.*`, `git.*`, `shell.*`, `test.*`, `patch.*`). The runtime's
@@ -141,6 +143,18 @@ Verification is a layer *above* the gateway, not a tool: it runs typed checks by
 - **Binding.** `ExecutionVerifier` refuses (ERROR) when the task's `workspace_path` is not the gateway's workspace, so it can never verify a different tree than the one changed.
 - **Role 1 schema.** `VerificationCheck` gained optional `kind` and `evidence`, `VerificationResult` an optional `evidence` (run id, version before/after, `stable`, `next_steps`, `skipped`). Existing producers are unaffected. Messages are capped at 2000 characters.
 
+### 2.9 Artifacts, redaction and records (`execution/artifacts`)
+
+- **What is stored** (`ArtifactRef.kind`): `command_output` (the complete stdout/stderr once it outgrows the inline buffers), `test_report` (JSON of the `RunReport`, audit), `patch` (every applied and every rejected patch, audit), `diff` (complete text when `git.diff` was cut), `execution_record` (audit). A result always keeps a bounded excerpt, so a small output has no artifact.
+- **`ArtifactRef`** (extends the baseline): `id` (`art_` + 24 hex), `kind`, `description` (never a host path), and optional `size`, `sha256` (of the stored bytes), `retention` (`temporary`|`audit`), `truncated` (the stored copy is capped) and `redactions` (secrets masked). `ExecutionResult.data` gains `output_artifacts {stream: id}` for commands, `patch_artifact`, `execution_record` and, when storing failed, `artifact_errors`.
+- **Location and ownership.** Outside the working tree (`<git common dir>/aseos/artifacts`; per-workspace temp folder for non-Git directories). Each artifact has workspace id, action id, tool and optional task id (`ExecutionGateway(task_id=…)`). `artifact.read`/`list` only see the calling workspace; a foreign or unknown id both return `INVALID_ARGUMENTS` with the same message. Ids are validated before touching the filesystem.
+- **Bounds.** Per artifact 20 MB (head and tail kept, marker in between, `truncated=true`); `artifact.read` returns ≤256 KB per call. Store quota 500 MB: the oldest *temporary* artifacts are evicted first, audit artifacts are never evicted for space, and a store full of audit data refuses new writes (`full`).
+- **Retention.** `temporary` 7 days, `audit` 90 days (`RetentionPolicy`). Expired artifacts are unreadable immediately; `store.gc()` deletes them, orphan blobs and stale spool files. It is called when the quota is hit; scheduling is the host's job.
+- **Redaction** (`redact_text`) runs on `shell.run`/`test.run` output (inline, `data`, and the stored copy) and on stored `command_output`/`test_report`. It masks environment secret values and well-known credential shapes while keeping the key visible (`api_key = [REDACTED]`). It is not applied to file contents, patches or diffs (workspace content; secret files are already withheld by path rules). Best-effort: unrecognizable secrets are not found.
+- **Execution record** (`ExecutionRecord`): written for every action whose tool is not read-only (and for reads with `record_reads=True`), including refused ones: `action_id`, `tool`, `level`, capabilities, `success`/`error_category`/`exit_code`, `args_sha256` and a bounded redacted `args` summary (environment values never; patch/content only as size and hash), `links` (`patch_id`, `run_id`, test status, workspace fingerprint…), `artifact_ids`, `artifact_errors`, `redactions`. `gateway.add_observer(fn)` receives each record as a dict so the runtime can attach it to its own events; the store holds the durable copy.
+- **Failure handling.** Storing is best-effort and never changes the outcome: a failure is listed in `data.artifact_errors`, the excerpt remains, raw spool files are deleted regardless. If the store cannot be opened the gateway runs without artifacts (`gateway.store_error`). `artifact_store=False` disables them explicitly.
+- **Consistency** (`gateway.check_evidence(result)` → list of problems): failure without an error category; `shell.run` success vs exit code vs process status; `test.run` success vs status, counts adding up, PASSED/FAILED vs counts; `patch.apply` without patch id/files; per artifact: exists, same workspace and action, hash and size match the reference, and size equals the process's reported byte count when nothing was truncated. Verification (§2.8) reports ERROR instead of PASS if any problem is found.
+
 Default granted capabilities: `fs.read`, `fs.write`, `git.read`, `test.run`. Not granted by default: `fs.delete`, `fs.read_secrets`, `git.write`, `git.discard`, `worktree.manage`, `worktree.discard`, `shell.run`, `shell.network`.
 
 ### 2.6 Security semantics (details in [SECURITY_MODEL.md](SECURITY_MODEL.md))
@@ -194,7 +208,7 @@ are unaffected.
   allowed commands are not blocked until the sandbox (Phase 7). `HOME`/`USERPROFILE` are passed through.
 - A tool that ignores `ToolContext.cancel` cannot be interrupted; the gateway then reports `TIMEOUT` and warns that its worker may still run.
 - POSIX process-group handling and `prlimit` are implemented but have not been exercised on a POSIX machine.
-- No output-size limits, artifact store, redaction or execution events from the gateway yet.
+- Artifacts are per-workspace, unencrypted files; gc is not scheduled; execution records are not yet forwarded into Role 1's event stream.
 - Role 1's `ToolRegistry` names and policy risk labels are not yet aligned with the capability model.
 
 See [EXECUTION_PLAN.md](EXECUTION_PLAN.md) for the scheduled work.

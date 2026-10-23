@@ -2,10 +2,26 @@ import asyncio
 import threading
 import time
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from pydantic import ValidationError
 
+from execution.artifacts.consistency import check_result
+from execution.artifacts.records import (
+    ExecutionRecord,
+    links_from,
+    now_iso,
+    summarize_args,
+)
+from execution.artifacts.redact import redact_text
+from execution.artifacts.sink import ArtifactSink, NullSink
+from execution.artifacts.store import (
+    ArtifactError,
+    ArtifactStore,
+    default_store_for,
+    workspace_id,
+)
 from execution.security.levels import PROFILES, ExecutionLevel, Profile
 from execution.gateway.tool import (
     Tool,
@@ -34,8 +50,22 @@ class ExecutionGateway:
         profile: Profile | str | None = None,
         sandbox: Any = None,
         require_sandbox: bool | None = None,
+        artifact_store: ArtifactStore | bool | None = None,
+        task_id: str | None = None,
+        record_reads: bool = False,
     ) -> None:
         self.workspace = Path(workspace_path).resolve()
+        self.task_id = task_id
+        self.workspace_id = workspace_id(self.workspace)
+        self.record_reads = record_reads
+        self.observers: list[Callable[[dict[str, Any]], None]] = []
+        # None = open the default per-repository store on first use;
+        # False = artifacts disabled; or an explicit store.
+        self._store_setting = artifact_store
+        self._store: ArtifactStore | None = (
+            artifact_store if isinstance(artifact_store, ArtifactStore) else None
+        )
+        self.store_error: str | None = None
 
         if not self.workspace.is_dir():
             raise ValueError(
@@ -77,6 +107,48 @@ class ExecutionGateway:
         for tool in tools or []:
             self.register(tool)
 
+    @property
+    def artifact_store(self) -> ArtifactStore | None:
+        """The artifact store, opened on first use (None when disabled/unavailable)."""
+
+        if self._store is None and self._store_setting is not False and self.store_error is None:
+            try:
+                self._store = default_store_for(self.workspace)
+            except (ArtifactError, OSError) as exc:
+                self.store_error = str(exc)
+
+        return self._store
+
+    def _sink(self, action: Action, tool_name: str | None) -> ArtifactSink | NullSink:
+        store = self.artifact_store
+
+        if store is None:
+            return NullSink()
+
+        return ArtifactSink(
+            store,
+            workspace=self.workspace_id,
+            action_id=action.id,
+            tool=tool_name,
+            task_id=self.task_id,
+        )
+
+    def add_observer(self, observer: Callable[[dict[str, Any]], None]) -> None:
+        """Called with each execution record (a dict) after the action ends.
+        Lets the runtime forward records to its event system."""
+
+        self.observers.append(observer)
+
+    def check_evidence(self, result: ExecutionResult) -> list[str]:
+        """Inconsistencies between a result and its own artifacts (see
+        execution/artifacts/consistency.py); empty when consistent."""
+
+        store = self.artifact_store
+        sink: ArtifactSink | NullSink = (
+            ArtifactSink(store, workspace=self.workspace_id) if store else NullSink()
+        )
+        return check_result(result, sink)
+
     def register(self, tool: Tool) -> None:
         action_type = tool.spec.action_type
 
@@ -95,8 +167,10 @@ class ExecutionGateway:
 
     async def execute(self, action: Action) -> ExecutionResult:
         started = time.perf_counter()
+        started_at = now_iso()
         tool = self.get_tool(action.type)
         tool_name = tool.spec.name if tool is not None else None
+        sink = self._sink(action, tool_name)
 
         try:
             if tool is None:
@@ -107,14 +181,14 @@ class ExecutionGateway:
 
             self._check_capabilities(tool)
             args = self._validate_args(tool, action.payload)
-            output = await self._run(tool, args, action)
-            return self._result(action, tool_name, started, output=output)
+            output = await self._run(tool, args, action, sink)
+            result = self._result(action, tool_name, started, output=output)
 
         except ToolError as error:
-            return self._result(action, tool_name, started, error=error)
+            result = self._result(action, tool_name, started, error=error)
 
         except Exception as exc:  # unexpected tool bug: report, never crash
-            return self._result(
+            result = self._result(
                 action,
                 tool_name,
                 started,
@@ -122,6 +196,118 @@ class ExecutionGateway:
                     "INTERNAL_ERROR", f"{type(exc).__name__}: {exc}"
                 ),
             )
+
+        return self._finish(action, tool, result, sink, started_at)
+
+    # ------------------------------------------------- redaction and records
+
+    @staticmethod
+    def _redact_value(value: Any) -> tuple[Any, int]:
+        if isinstance(value, str):
+            redacted = redact_text(value)
+            return redacted.text, redacted.count
+
+        if isinstance(value, dict):
+            total = 0
+            out = {}
+
+            for key, item in value.items():
+                out[key], count = ExecutionGateway._redact_value(item)
+                total += count
+
+            return out, total
+
+        if isinstance(value, list):
+            total = 0
+            items = []
+
+            for item in value:
+                new, count = ExecutionGateway._redact_value(item)
+                items.append(new)
+                total += count
+
+            return items, total
+
+        return value, 0
+
+    def _finish(
+        self,
+        action: Action,
+        tool: Tool | None,
+        result: ExecutionResult,
+        sink: ArtifactSink | NullSink,
+        started_at: str,
+    ) -> ExecutionResult:
+        """Mask secrets in program output, surface artifact failures, and
+        write the execution record."""
+
+        redactions = sum(ref.redactions for ref in result.artifacts)
+
+        if tool is not None and tool.spec.redact_output:
+            for field_name in ("stdout", "stderr"):
+                masked = redact_text(getattr(result, field_name))
+                setattr(result, field_name, masked.text)
+                redactions += masked.count
+
+            result.data, count = self._redact_value(result.data)
+            redactions += count
+
+        result.data.update(sink.failure_data())
+
+        if tool is None or not (self.record_reads or not tool.spec.read_only):
+            return result
+
+        try:
+            digest, args = summarize_args(action.payload)
+            record = ExecutionRecord(
+                action_id=action.id,
+                action_type=action.type,
+                tool=tool.spec.name,
+                workspace_id=self.workspace_id,
+                task_id=self.task_id,
+                started_at=started_at,
+                finished_at=now_iso(),
+                duration_ms=result.duration_ms or 0,
+                level=tool.spec.level.name,
+                capabilities=sorted(tool.spec.capabilities),
+                sandboxed=result.data.get("sandboxed"),
+                success=result.success,
+                error_category=result.error_category,
+                exit_code=result.exit_code,
+                truncated=result.truncated,
+                args_sha256=digest,
+                args=args,
+                links=links_from(result.data),
+                artifact_ids=[ref.id for ref in result.artifacts],
+                artifact_errors=list(sink.errors),
+                redactions=redactions,
+            )
+        except Exception:  # an audit bug must not change the outcome
+            return result
+
+        ref = sink.put(
+            record.model_dump_json(),
+            kind="execution_record",
+            description=f"{tool.spec.name} {action.id}",
+            media_type="application/json",
+            retention="audit",
+            redact=False,  # built from summarized, already-redacted fields
+        )
+
+        if ref is not None:
+            result.data["execution_record"] = ref.id  # outputs stay in `artifacts`
+
+        result.data.update(sink.failure_data())  # includes a failed audit write
+
+        payload = record.model_dump()
+
+        for observer in list(self.observers):
+            try:
+                observer(payload)
+            except Exception:
+                pass  # observers are best-effort
+
+        return result
 
     def describe_tools(self) -> list[dict[str, Any]]:
         """What each registered tool needs, for planners and UIs."""
@@ -179,7 +365,9 @@ class ExecutionGateway:
                 f"Invalid arguments for '{tool.spec.name}': {details}",
             ) from exc
 
-    async def _run(self, tool: Tool, args, action: Action) -> ToolOutput:
+    async def _run(
+        self, tool: Tool, args, action: Action, sink: ArtifactSink | NullSink
+    ) -> ToolOutput:
         cancel = threading.Event()
         context = ToolContext(
             workspace=self.workspace,
@@ -189,6 +377,7 @@ class ExecutionGateway:
             sandbox=self.sandbox,
             require_sandbox=self.require_sandbox,
             cancel=cancel,
+            artifacts=sink,
         )
         self._track(action.id, cancel)
         future = asyncio.ensure_future(
